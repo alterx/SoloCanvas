@@ -21,34 +21,18 @@ A freeform canvas tool built for solo tabletop RPG players. Place card decks, di
 
 ## Installation
 
-### Requirements
-
-- Python 3.10 or newer (3.14 recommended)
-- pip
 
 ### Steps
 
-1. **Clone or download the repository:**
+1. **Download the 7z from releases**
 
-   ```bash
-   git clone https://github.com/GeoffAO/SoloCanvas.git
-   cd SoloCanvas
-   ```
+   Unzip the file on your drive.
 
-2. **Install dependencies:**
+2. **Run EXE**
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+   Run the SoloCanvas.exe
 
-   Dependencies installed:
-   | Package | Purpose |
-   |---|---|
-   | PyQt6 ≥ 6.5 | UI framework |
-   | Pillow ≥ 10.0 | Image processing |
-   | qtawesome ≥ 1.3 | Icon fonts |
-   | markdown ≥ 3.5 | Notepad rendering |
-   | markdownify ≥ 0.11 | Notepad saving |
+   Be sure to keep the .exe in the same folder as your /Deck /Dice /Images and /Notes folders.
 
 ---
 
