@@ -101,9 +101,11 @@ class SessionManager:
         hand_widget,         # HandWidget
         deck_models: dict,   # {deck_id: DeckModel}
         deck_items: dict,    # {deck_id: DeckItem}
-        die_items: list = None,    # list[DieItem]
-        roll_log: list = None,     # list of roll log entries
-        image_items: list = None,  # list[ImageItem]
+        die_items: list = None,           # list[DieItem]
+        roll_log: list = None,            # list of roll log entries
+        image_items: list = None,         # list[ImageItem]
+        measurement_items: list = None,   # list[MeasurementItem]
+        drawing_items: list = None,       # list[DrawingStrokeItem | DrawingShapeItem]
     ) -> Dict[str, Any]:
         from .card_item import CardItem
         from .deck_item import DeckItem
@@ -173,6 +175,20 @@ class SessionManager:
                 if img.scene() is not None:
                     images_data.append(img.to_state_dict())
 
+        # Measurement items on canvas (frozen only)
+        measurements_data = []
+        if measurement_items:
+            for mi in measurement_items:
+                if mi.scene() is not None:
+                    measurements_data.append(mi.to_dict())
+
+        # Drawing items (strokes + shapes)
+        drawings_data = []
+        if drawing_items:
+            for di in drawing_items:
+                if di.scene() is not None:
+                    drawings_data.append(di.to_dict())
+
         # Global hover_preview state — same value on all items; default True
         hover_preview = True
         for item in canvas_scene.items():
@@ -193,5 +209,7 @@ class SessionManager:
             "dice":          dice_data,
             "roll_log":      list(roll_log) if roll_log is not None else [],
             "images":        images_data,
+            "measurements":  measurements_data,
+            "drawings":      drawings_data,
             "hover_preview": hover_preview,
         }

@@ -123,8 +123,50 @@ DEFAULT_DISPLAY: Dict[str, Any] = {
     "card_canvas_height":   168,
     "rotation_step":        45,             # degrees per rotate CW/CCW: 15 | 45 | 90
     "image_import_size":    1.2,            # default width/height in grid cells
-    "use_canvas_theme":     True,           # tint UI chrome to match canvas colour
     "card_picker_thumb_w":  48,             # thumbnail width in CardPickerDialog
+}
+
+DEFAULT_TOOLBAR = {
+    "button_order":      ["hand", "lib", "rcl", "img_lib", "dice", "log", "notepad", "measure", "draw", "pdf"],
+    "button_visibility": {"hand": True, "lib": True, "rcl": True, "img_lib": True,
+                          "dice": True, "log": True, "notepad": True, "measure": True, "draw": True, "pdf": True},
+    "collapsed":         False,
+}
+
+DEFAULT_DRAWING: Dict[str, Any] = {
+    "stroke_width": 3,
+    "stroke_color": "#FFFFFF",
+    "fill_color":   "#FFFFFF",
+    "fill_opacity": 0,        # 0–100
+    "snap_to_grid": False,
+    "sub_tool":     "freehand",
+    "settings_x":   None,
+    "settings_y":   None,
+}
+
+DEFAULT_SYSTEM: Dict[str, Any] = {
+    "undo_stack_size": 50,
+}
+
+DEFAULT_PDF: Dict[str, Any] = {
+    "last_path":        "",
+    "last_pages":       {},   # path → page number
+    "recently_used":    [],   # list of {"path": ..., "title": ...}
+    "user_bookmarks":   {},   # path → list of {"page": ..., "label": ...}
+    "sidebar_collapsed": False,
+    "sidebar_width":    220,
+    "sidebar_panel":    "thumbnails",   # "outlines" | "bookmarks" | "thumbnails"
+    "zoom_mode":        "auto",         # "width" | "height" | "page" | "auto" | "custom"
+    "zoom_factor":      1.0,
+    "window_geometry":  None,           # [x, y, w, h] or None
+}
+
+DEFAULT_MEASUREMENT: Dict[str, Any] = {
+    "cell_value":    5,        # numeric value per grid cell (e.g. 5)
+    "cell_unit":     "ft",     # unit label (e.g. "ft", "m")
+    "cone_angle":    53,       # cone full angle in degrees
+    "mode":          "grid",   # "grid" | "free"
+    "measure_type":  "line",   # "line" | "area" | "cone"
 }
 
 
@@ -140,9 +182,18 @@ class SettingsManager:
     def __init__(self):
         self._path = _config_dir() / "settings.json"
         self._data: Dict[str, Any] = {
-            "hotkeys": dict(DEFAULT_HOTKEYS),
-            "canvas":  dict(DEFAULT_CANVAS),
-            "display": dict(DEFAULT_DISPLAY),
+            "hotkeys":     dict(DEFAULT_HOTKEYS),
+            "canvas":      dict(DEFAULT_CANVAS),
+            "display":     dict(DEFAULT_DISPLAY),
+            "measurement": dict(DEFAULT_MEASUREMENT),
+            "drawing":     dict(DEFAULT_DRAWING),
+            "system":      dict(DEFAULT_SYSTEM),
+            "pdf":         dict(DEFAULT_PDF),
+            "toolbar": {
+                "button_order":      list(DEFAULT_TOOLBAR["button_order"]),
+                "button_visibility": dict(DEFAULT_TOOLBAR["button_visibility"]),
+                "collapsed":         DEFAULT_TOOLBAR["collapsed"],
+            },
         }
         self._load()
 
@@ -157,9 +208,18 @@ class SettingsManager:
             with open(self._path, "r", encoding="utf-8") as f:
                 saved = json.load(f)
             # Deep-merge: keep defaults for any missing keys
-            for section in ("hotkeys", "canvas", "display"):
+            for section in ("hotkeys", "canvas", "display", "measurement", "drawing", "system", "pdf"):
                 if section in saved:
                     self._data[section].update(saved[section])
+            if "toolbar" in saved:
+                tb = saved["toolbar"]
+                self._data["toolbar"].update(
+                    {k: v for k, v in tb.items() if k != "button_visibility"}
+                )
+                if "button_visibility" in tb:
+                    self._data["toolbar"]["button_visibility"].update(
+                        tb["button_visibility"]
+                    )
         except Exception:
             pass  # Silently fall back to defaults
 
@@ -205,6 +265,61 @@ class SettingsManager:
 
     def set_display(self, key: str, value: Any) -> None:
         self._data["display"][key] = value
+
+    # ------------------------------------------------------------------
+    # Measurement
+    # ------------------------------------------------------------------
+
+    def measurement(self, key: str) -> Any:
+        return self._data["measurement"].get(key, DEFAULT_MEASUREMENT.get(key))
+
+    def set_measurement(self, key: str, value: Any) -> None:
+        self._data["measurement"][key] = value
+
+    # ------------------------------------------------------------------
+    # Toolbar
+    # ------------------------------------------------------------------
+
+    def toolbar(self, key: str) -> Any:
+        return self._data["toolbar"].get(key, DEFAULT_TOOLBAR.get(key))
+
+    def set_toolbar(self, key: str, value: Any) -> None:
+        self._data["toolbar"][key] = value
+
+    # ------------------------------------------------------------------
+    # Drawing
+    # ------------------------------------------------------------------
+
+    def drawing(self, key: str) -> Any:
+        return self._data["drawing"].get(key, DEFAULT_DRAWING.get(key))
+
+    def set_drawing(self, key: str, value: Any) -> None:
+        self._data["drawing"][key] = value
+
+    # ------------------------------------------------------------------
+    # System
+    # ------------------------------------------------------------------
+
+    def system(self, key: str) -> Any:
+        return self._data["system"].get(key, DEFAULT_SYSTEM.get(key))
+
+    def set_system(self, key: str, value: Any) -> None:
+        self._data["system"][key] = value
+
+    # ------------------------------------------------------------------
+    # PDF viewer
+    # ------------------------------------------------------------------
+
+    def pdf(self, key: str) -> Any:
+        return self._data["pdf"].get(key, DEFAULT_PDF.get(key))
+
+    def set_pdf(self, key: str, value: Any) -> None:
+        self._data["pdf"][key] = value
+
+    def pdf_thumbs_dir(self) -> Path:
+        d = _config_dir() / "pdf_thumbs"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
 
     # ------------------------------------------------------------------
     # Sessions dir

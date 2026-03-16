@@ -13,7 +13,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-"""HandWidget – the persistent card-hand strip at the bottom of the window."""
+"""HandWidget – floating card-hand panel centred at the bottom of the canvas."""
 from __future__ import annotations
 
 import json
@@ -22,31 +22,31 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Set
 
-import qtawesome as qta
-
-from PyQt6.QtCore import QEvent, QMimeData, QPointF, QRect, QRectF, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import (
-    QBrush, QColor, QDrag, QFont, QMouseEvent, QPainter, QPen,
-    QPixmap, QWheelEvent,
+from PyQt6.QtCore import (
+    QEasingCurve, QMimeData, QPointF, QPropertyAnimation,
+    QRect, QRectF, QSize, Qt, pyqtProperty, pyqtSignal,
 )
-from PyQt6.QtWidgets import QMenu, QToolTip, QWidget
+from PyQt6.QtGui import (
+    QBrush, QColor, QDrag, QFont, QMouseEvent, QPainter,
+    QPainterPath, QPen, QPixmap,
+)
+from PyQt6.QtWidgets import QGraphicsDropShadowEffect, QMenu, QWidget
 
 
-HAND_PADDING_V = 8
-HAND_PADDING_H = 12
-MAX_OVERLAP     = 0.40   # cards may overlap up to 40% before shrinking
-_LIB_BTN_W      = 52     # width reserved on the left for the side buttons
-_DICE_BTN_W     = 52     # width reserved on the right for the dice button
-_BTN_SIZE       = 36     # side button square size in px
-TAB_HEIGHT      = 22     # height of the collapse/restore tab strip
+HAND_PADDING_V      = 8
+HAND_PADDING_H      = 12
+MAX_OVERLAP         = 0.40    # cards may overlap up to 40% before compressing
+_HAND_MARGIN_BOTTOM = 12      # px gap between widget bottom and parent bottom
+_HAND_RADIUS        = 10      # corner radius
+_C_BG               = QColor("#292A35")
+_C_BORDER           = QColor("#4B4D63")
 
 
 @dataclass
 class HandCardState:
-    card_data: object       # CardData
+    card_data: object
     face_up:   bool  = True
     rotation:  float = 0.0
-    # Cached pixmaps (populated lazily)
     _front_pix: Optional[QPixmap] = field(default=None, repr=False)
     _back_pix:  Optional[QPixmap] = field(default=None, repr=False)
 
@@ -68,180 +68,104 @@ class HandCardState:
 
 class HandWidget(QWidget):
     """
-    Horizontal strip showing cards in hand.
-    Cards shrink to fit window width; supports multi-select, flip, rotate,
-    drag-to-canvas, and right-click context menu.
+    Floating card-hand panel centred at the bottom of the canvas.
 
-    Rendered as a semi-transparent overlay over the canvas when
-    WA_TranslucentBackground is set by the parent.
+    Width starts at 33 % of parent and expands dynamically (up to 75 %) to
+    accommodate cards; beyond 75 % cards overlap more via the existing
+    scale-down logic.
+
+    Toggle visibility with toggle_visible().  The panel animates horizontally
+    toward/from its centre on show/hide.
     """
 
-    # Signals
-    send_to_canvas           = pyqtSignal(object, object)  # CardData, QPointF (scene pos hint)
-    return_to_deck           = pyqtSignal(object)           # CardData
-    request_canvas_pos       = pyqtSignal()                 # ask MainWindow for a default drop pos
-    library_button_clicked   = pyqtSignal()                 # user clicked the library icon
-    recall_clicked           = pyqtSignal()                 # user clicked the recall button
-    stack_to_canvas_requested = pyqtSignal(list)            # List[(CardData, face_up bool)]
-    request_undo_snapshot     = pyqtSignal()                # ask MainWindow to push undo before action
-    dice_library_clicked      = pyqtSignal()                # user clicked the dice button
-    roll_log_clicked          = pyqtSignal()                # user clicked the roll log button
-    notepad_clicked           = pyqtSignal()                # user clicked the notepad button
-    image_library_clicked     = pyqtSignal()                # user clicked the image library button
-    hand_card_hovered         = pyqtSignal(object)          # CardData — mouse entered a hand card
-    hand_card_unhovered       = pyqtSignal()                # mouse left a hand card
+    # Signals (unchanged public interface)
+    send_to_canvas            = pyqtSignal(object, object)
+    return_to_deck            = pyqtSignal(object)
+    request_canvas_pos        = pyqtSignal()
+    stack_to_canvas_requested = pyqtSignal(list)
+    request_undo_snapshot     = pyqtSignal()
+    hand_card_hovered         = pyqtSignal(object)
+    hand_card_unhovered       = pyqtSignal()
+
+    # New signals
+    visibility_changed      = pyqtSignal(bool)  # True = shown, False = hidden
+    hand_card_count_changed = pyqtSignal(int)   # emitted after every card-list change
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
-        self._settings   = settings
+        self._settings  = settings
         self.hand_cards: List[HandCardState] = []
         self._selected:  Set[int]            = set()
 
-        # Max card size from settings
         self._max_cw: int = settings.display("max_hand_card_width")
-        # Maintain aspect ratio (poker)
         self._max_ch: int = int(self._max_cw * 168 / 120)
-        self._collapsed: bool = False  # must be set before _update_height
+        self._visible: bool = True
+        self._animating_toggle: bool = False
+        self._current_w: int = 0      # set properly below
 
-        self.setMinimumHeight(60)
-        self._update_height()
-
-        # Mouse tracking for hover / drag
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setMouseTracking(True)
-        self._drag_start_idx: Optional[int] = None
-        self._drag_start_pos: Optional[QPointF] = None
-        self._hovered_idx: Optional[int] = None
-        self._last_clicked_idx: Optional[int] = None  # anchor for Shift+click range
-        self._pending_deselect: bool = False           # deselect multi on release (if no drag)
+
+        # Drop shadow (disabled during animation to prevent artefacts)
+        self._shadow = QGraphicsDropShadowEffect(self)
+        self._shadow.setBlurRadius(18)
+        self._shadow.setOffset(0, 4)
+        self._shadow.setColor(QColor(0, 0, 0, 160))
+        self.setGraphicsEffect(self._shadow)
+
+        # Horizontal width animation (shrink/expand toward centre)
+        self._anim = QPropertyAnimation(self, b"hand_w")
+        self._anim.setDuration(200)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.finished.connect(self._on_anim_finished)
 
         self.setAcceptDrops(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._drop_highlight: bool = False
-        self._hovered_btn: Optional[str] = None  # 'lib', 'rcl', 'dice', 'log', or None
+
+        # Mouse interaction state
+        self._drag_start_idx: Optional[int]    = None
+        self._drag_start_pos: Optional[QPointF] = None
+        self._hovered_idx:     Optional[int]   = None
+        self._last_clicked_idx: Optional[int]  = None
+        self._pending_deselect: bool            = False
 
         # Reorder drag state
-        self._reorder_mode: bool = False
-        self._reorder_drag_idx: Optional[int] = None
+        self._reorder_mode:       bool          = False
+        self._reorder_drag_idx:   Optional[int] = None
         self._reorder_insert_pos: Optional[int] = None
 
         # Rubber-band selection state
-        self._rubber_active: bool = False
+        self._rubber_active: bool           = False
         self._rubber_origin: Optional[QPointF] = None
-        self._rubber_rect: Optional[QRect] = None
+        self._rubber_rect:   Optional[QRect]   = None
 
-    def set_drop_highlight(self, active: bool) -> None:
-        if active != self._drop_highlight:
-            self._drop_highlight = active
-            self.update()
-
-    # ------------------------------------------------------------------
-    # Public interface
-    # ------------------------------------------------------------------
-
-    def sizeHint(self) -> QSize:
-        if self._collapsed:
-            return QSize(0, TAB_HEIGHT)
-        return QSize(0, TAB_HEIGHT + self._max_ch + 2 * HAND_PADDING_V)
-
-    def toggle_collapse(self) -> None:
-        self._collapsed = not self._collapsed
-        self._update_height()
-        self.update()
-
-    def add_card(self, card_data, face_up: bool = True, rotation: float = 0.0) -> None:
-        self.hand_cards.append(HandCardState(card_data, face_up, rotation))
-        self._update_height()
-        self.update()
-
-    def remove_card_by_id(self, card_id: str) -> Optional[HandCardState]:
-        for i, hs in enumerate(self.hand_cards):
-            if hs.card_data.id == card_id:
-                self._selected.discard(i)
-                self._selected = {j if j < i else j - 1 for j in self._selected if j != i}
-                return self.hand_cards.pop(i)
-        return None
-
-    def remove_card_by_image_path(self, path: str) -> Optional[HandCardState]:
-        for i, hs in enumerate(self.hand_cards):
-            if hs.card_data.image_path == path:
-                self._selected.discard(i)
-                self._selected = {j if j < i else j - 1 for j in self._selected if j != i}
-                return self.hand_cards.pop(i)
-        return None
-
-    def clear(self) -> List[HandCardState]:
-        removed = list(self.hand_cards)
-        self.hand_cards.clear()
-        self._selected.clear()
-        self.update()
-        return removed
-
-    def set_max_card_width(self, w: int) -> None:
-        self._max_cw = max(40, w)
-        self._max_ch = int(self._max_cw * 168 / 120)
-        self._update_height()
-        self.update()
+        # Initial size and position
+        self._current_w = self._target_width()
+        self.setFixedWidth(max(1, self._current_w))
+        self.setFixedHeight(self._hand_height())
+        if parent is not None:
+            self.reposition(parent.width(), parent.height())
 
     # ------------------------------------------------------------------
-    # Layout helpers
+    # Geometry helpers
     # ------------------------------------------------------------------
 
-    def _lib_btn_rect(self) -> QRect:
-        card_area_h = self.height() - TAB_HEIGHT
-        third_h = card_area_h // 3
-        cx = _LIB_BTN_W // 2
-        cy = TAB_HEIGHT + third_h // 2
-        return QRect(cx - _BTN_SIZE // 2, cy - _BTN_SIZE // 2, _BTN_SIZE, _BTN_SIZE)
+    def _hand_height(self) -> int:
+        return 2 * HAND_PADDING_V + self._max_ch
 
-    def _recall_btn_rect(self) -> QRect:
-        card_area_h = self.height() - TAB_HEIGHT
-        third_h = card_area_h // 3
-        cx = _LIB_BTN_W // 2
-        cy = TAB_HEIGHT + third_h + third_h // 2
-        return QRect(cx - _BTN_SIZE // 2, cy - _BTN_SIZE // 2, _BTN_SIZE, _BTN_SIZE)
+    def _target_width(self) -> int:
+        """Ideal widget width: 33–75 % of parent, expanding to fit cards."""
+        p = self.parent()
+        pw = p.width() if p else 800
+        min_w = max(100, int(pw * 0.33))
+        max_w = int(pw * 0.75)
 
-    def _img_lib_btn_rect(self) -> QRect:
-        card_area_h = self.height() - TAB_HEIGHT
-        third_h = card_area_h // 3
-        cx = _LIB_BTN_W // 2
-        cy = TAB_HEIGHT + 2 * third_h + third_h // 2
-        return QRect(cx - _BTN_SIZE // 2, cy - _BTN_SIZE // 2, _BTN_SIZE, _BTN_SIZE)
-
-    def _dice_btn_rect(self) -> QRect:
-        """Dice button in the top third of the right column."""
-        card_area_h = self.height() - TAB_HEIGHT
-        third_h = card_area_h // 3
-        cx = self.width() - _DICE_BTN_W // 2
-        cy = TAB_HEIGHT + third_h // 2
-        return QRect(cx - _BTN_SIZE // 2, cy - _BTN_SIZE // 2, _BTN_SIZE, _BTN_SIZE)
-
-    def _log_btn_rect(self) -> QRect:
-        """Roll Log button in the middle third of the right column."""
-        card_area_h = self.height() - TAB_HEIGHT
-        third_h = card_area_h // 3
-        cx = self.width() - _DICE_BTN_W // 2
-        cy = TAB_HEIGHT + third_h + third_h // 2
-        return QRect(cx - _BTN_SIZE // 2, cy - _BTN_SIZE // 2, _BTN_SIZE, _BTN_SIZE)
-
-    def _notepad_btn_rect(self) -> QRect:
-        """Notepad button in the bottom third of the right column."""
-        card_area_h = self.height() - TAB_HEIGHT
-        third_h = card_area_h // 3
-        cx = self.width() - _DICE_BTN_W // 2
-        cy = TAB_HEIGHT + 2 * third_h + third_h // 2
-        return QRect(cx - _BTN_SIZE // 2, cy - _BTN_SIZE // 2, _BTN_SIZE, _BTN_SIZE)
-
-    def _card_rects(self) -> List[QRect]:
         n = len(self.hand_cards)
         if n == 0:
-            return []
+            return min_w
 
         ch = self._max_ch
-        card_area_h = self.height() - TAB_HEIGHT
-        cy = TAB_HEIGHT + (card_area_h - ch) // 2
-        avail = self.width() - _LIB_BTN_W - _DICE_BTN_W - 2 * HAND_PADDING_H
-
-        # Per-card natural width derived from each card's actual image aspect ratio
         nat_widths = []
         for hs in self.hand_cards:
             pix = hs.current_pixmap()
@@ -251,22 +175,197 @@ class HandWidget(QWidget):
                 w = self._max_cw
             nat_widths.append(w)
 
-        # Total natural width with overlap
+        if n > 1:
+            total_nat = int(
+                sum(w * (1 - MAX_OVERLAP) for w in nat_widths[:-1])
+                + nat_widths[-1]
+                + 2 * HAND_PADDING_H
+            )
+        else:
+            total_nat = nat_widths[0] + 2 * HAND_PADDING_H
+
+        return max(min_w, min(total_nat, max_w))
+
+    def reposition(self, parent_w: int, parent_h: int) -> None:
+        """Called by MainWindow on resize to keep the panel centred at bottom."""
+        h = self._hand_height()
+        if self.height() != h:
+            self.setFixedHeight(h)
+
+        if self._visible and not self._animating_toggle:
+            target_w = self._target_width()
+            if target_w != self._current_w:
+                self._current_w = target_w
+                self.setFixedWidth(max(1, target_w))
+
+        y = parent_h - self._hand_height() - _HAND_MARGIN_BOTTOM
+        cx = parent_w // 2
+        self.move(cx - self._current_w // 2, y)
+
+    def _snap_to_target_width(self) -> None:
+        """Instantly resize width to match current card count (no animation)."""
+        if not self._visible or self._animating_toggle:
+            return
+        target = self._target_width()
+        if target == self._current_w:
+            return
+        self._current_w = target
+        self.setFixedWidth(max(1, target))
+        p = self.parent()
+        if p:
+            cx = p.width() // 2
+            y = p.height() - self._hand_height() - _HAND_MARGIN_BOTTOM
+            self.move(cx - target // 2, y)
+
+    # ------------------------------------------------------------------
+    # Animated hand_w pyqtProperty
+    # ------------------------------------------------------------------
+
+    def _get_hand_w(self) -> int:
+        return self._current_w
+
+    def _set_hand_w(self, v: int) -> None:
+        self._current_w = v
+        self.setFixedWidth(max(1, v))
+        p = self.parent()
+        if p:
+            cx = p.width() // 2
+            y = p.height() - self._hand_height() - _HAND_MARGIN_BOTTOM
+            self.move(cx - v // 2, y)
+            p.update()  # clear stale shadow pixels left in parent by previous frame
+        self.update()
+
+    hand_w = pyqtProperty(int, _get_hand_w, _set_hand_w)
+
+    def _on_anim_finished(self) -> None:
+        self._animating_toggle = False
+        self._shadow.setEnabled(True)
+        if not self._visible:
+            self.hide()
+
+    # ------------------------------------------------------------------
+    # Toggle visibility
+    # ------------------------------------------------------------------
+
+    def toggle_visible(self) -> None:
+        self._visible = not self._visible
+        self._animating_toggle = True
+        self._shadow.setEnabled(False)
+        if self._visible:
+            target_w = self._target_width()
+            self._current_w = 0
+            self.setFixedWidth(1)
+            p = self.parent()
+            if p:
+                cx = p.width() // 2
+                y = p.height() - self._hand_height() - _HAND_MARGIN_BOTTOM
+                self.move(cx, y)
+            self.show()
+            self._anim.stop()
+            self._anim.setStartValue(0)
+            self._anim.setEndValue(target_w)
+            self._anim.start()
+            self.visibility_changed.emit(True)
+        else:
+            self._anim.stop()
+            self._anim.setStartValue(self._current_w)
+            self._anim.setEndValue(0)
+            self._anim.start()
+            self.visibility_changed.emit(False)
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
+
+    def sizeHint(self) -> QSize:
+        return QSize(self._current_w, self._hand_height())
+
+    def set_drop_highlight(self, active: bool) -> None:
+        if not self._visible:
+            return
+        if active != self._drop_highlight:
+            self._drop_highlight = active
+            self.update()
+
+    def add_card(self, card_data, face_up: bool = True, rotation: float = 0.0) -> None:
+        self.hand_cards.append(HandCardState(card_data, face_up, rotation))
+        self._after_cards_changed()
+        self.update()
+
+    def remove_card_by_id(self, card_id: str) -> Optional[HandCardState]:
+        for i, hs in enumerate(self.hand_cards):
+            if hs.card_data.id == card_id:
+                self._selected.discard(i)
+                self._selected = {j if j < i else j - 1 for j in self._selected if j != i}
+                result = self.hand_cards.pop(i)
+                self._after_cards_changed()
+                return result
+        return None
+
+    def remove_card_by_image_path(self, path: str) -> Optional[HandCardState]:
+        for i, hs in enumerate(self.hand_cards):
+            if hs.card_data.image_path == path:
+                self._selected.discard(i)
+                self._selected = {j if j < i else j - 1 for j in self._selected if j != i}
+                result = self.hand_cards.pop(i)
+                self._after_cards_changed()
+                return result
+        return None
+
+    def clear(self) -> List[HandCardState]:
+        removed = list(self.hand_cards)
+        self.hand_cards.clear()
+        self._selected.clear()
+        self._after_cards_changed()
+        self.update()
+        return removed
+
+    def set_max_card_width(self, w: int) -> None:
+        self._max_cw = max(40, w)
+        self._max_ch = int(self._max_cw * 168 / 120)
+        self.setFixedHeight(self._hand_height())
+        self._snap_to_target_width()
+        self.update()
+
+    def _after_cards_changed(self) -> None:
+        self._snap_to_target_width()
+        self.hand_card_count_changed.emit(len(self.hand_cards))
+
+    # ------------------------------------------------------------------
+    # Layout helpers
+    # ------------------------------------------------------------------
+
+    def _card_rects(self) -> List[QRect]:
+        n = len(self.hand_cards)
+        if n == 0:
+            return []
+
+        ch = self._max_ch
+        cy = (self.height() - ch) // 2        # vertically centred in the widget
+        avail = self.width() - 2 * HAND_PADDING_H
+
+        nat_widths = []
+        for hs in self.hand_cards:
+            pix = hs.current_pixmap()
+            if pix and not pix.isNull() and pix.height() > 0:
+                w = int(ch * pix.width() / pix.height())
+            else:
+                w = self._max_cw
+            nat_widths.append(w)
+
         if n > 1:
             total_nat = sum(w * (1 - MAX_OVERLAP) for w in nat_widths[:-1]) + nat_widths[-1]
         else:
             total_nat = nat_widths[0]
 
-        # Scale all widths proportionally if they don't fit
-        scale = min(1.0, avail / total_nat) if total_nat > 0 else 1.0
+        scale  = min(1.0, avail / total_nat) if total_nat > 0 else 1.0
         widths = [max(1, int(w * scale)) for w in nat_widths]
 
-        # Center cards in available area
         if n > 1:
             total_w = sum(w * (1 - MAX_OVERLAP) for w in widths[:-1]) + widths[-1]
         else:
             total_w = widths[0]
-        x = _LIB_BTN_W + HAND_PADDING_H + max(0, int((avail - total_w) / 2))
+        x = HAND_PADDING_H + max(0, int((avail - total_w) / 2))
 
         rects = []
         for i, w in enumerate(widths):
@@ -275,16 +374,7 @@ class HandWidget(QWidget):
                 x += int(w * (1 - MAX_OVERLAP))
         return rects
 
-    def _update_height(self) -> None:
-        if self._collapsed:
-            self.setFixedHeight(TAB_HEIGHT)
-        else:
-            self.setFixedHeight(TAB_HEIGHT + self._max_ch + 2 * HAND_PADDING_V)
-
     def _index_at(self, pos: QPointF) -> Optional[int]:
-        """Return card index under pos, topmost (rightmost) first."""
-        if self._collapsed:
-            return None
         rects = self._card_rects()
         for i in range(len(rects) - 1, -1, -1):
             if rects[i].contains(pos.toPoint()):
@@ -295,121 +385,38 @@ class HandWidget(QWidget):
     # Painting
     # ------------------------------------------------------------------
 
-    def _panel_color(self) -> QColor:
-        """Darker shade of the current canvas background color."""
-        c = QColor(self._settings.canvas("background_color"))
-        h, s, v, _ = c.getHsvF()
-        result = QColor()
-        result.setHsvF(h, min(1.0, s * 1.1), max(0.0, v * 0.45))
-        return result
-
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        bg = self._panel_color()
-        painter.fillRect(self.rect(), bg)
+        # Rounded floating panel background
+        bg_rect = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
+        path = QPainterPath()
+        path.addRoundedRect(bg_rect, _HAND_RADIUS, _HAND_RADIUS)
+        painter.fillPath(path, _C_BG)
+        painter.setPen(QPen(_C_BORDER, 1))
+        painter.drawPath(path)
 
-        # Tab strip (always visible)
-        tab_rect = QRect(0, 0, self.width(), TAB_HEIGHT)
-        tab_bg = QColor(bg)
-        tab_bg.setHsvF(tab_bg.hsvHueF(), tab_bg.hsvSaturationF(),
-                       min(1.0, tab_bg.valueF() + 0.12))
-        painter.fillRect(tab_rect, tab_bg)
-        # Tab bottom divider
-        divider = QColor(bg)
-        divider.setHsvF(divider.hsvHueF(), divider.hsvSaturationF(),
-                        min(1.0, divider.valueF() + 0.22))
-        painter.setPen(QPen(divider, 1))
-        painter.drawLine(0, TAB_HEIGHT, self.width(), TAB_HEIGHT)
-        # Tab label
-        arrow = "▲" if self._collapsed else "▼"
-        count = len(self.hand_cards)
-        tab_label = f"{arrow}  Hand  ({count})"
-        txt_color = QColor(bg)
-        txt_color.setHsvF(txt_color.hsvHueF(),
-                          max(0.0, txt_color.hsvSaturationF() - 0.15),
-                          min(1.0, txt_color.valueF() + 0.65))
-        painter.setPen(txt_color)
-        painter.setFont(QFont("Arial", 9))
-        painter.drawText(tab_rect, Qt.AlignmentFlag.AlignCenter, tab_label)
-
-        if self._collapsed:
-            painter.end()
-            return
+        # "Hand" watermark — rendered behind cards
+        painter.setPen(QColor(0, 0, 0, 128))
+        painter.setFont(QFont("Arial", int(self.height() * 0.35), QFont.Weight.Bold))
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Hand")
 
         if self._drop_highlight:
-            card_area = self.rect().adjusted(0, TAB_HEIGHT, 0, 0)
-            painter.fillRect(card_area, QColor(80, 180, 255, 35))
+            painter.save()
+            painter.setClipPath(path)
+            painter.fillRect(self.rect(), QColor(80, 180, 255, 35))
             for thickness, alpha in ((8, 30), (5, 60), (3, 110), (2, 180), (1, 255)):
                 painter.setPen(QPen(QColor(100, 200, 255, alpha), thickness))
-                painter.drawLine(0, TAB_HEIGHT, self.width(), TAB_HEIGHT)
+                painter.drawPath(path)
             painter.setPen(QColor(180, 230, 255, 220))
             painter.setFont(QFont("Arial", 13, QFont.Weight.Bold))
-            label_rect = self.rect().adjusted(_LIB_BTN_W, TAB_HEIGHT, 0, 0)
-            painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, "↓  Drop to Hand")
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "↓  Drop to Hand")
+            painter.restore()
         else:
-            btn_bg  = QColor(bg); btn_bg.setHsvF(btn_bg.hsvHueF(), btn_bg.hsvSaturationF(), min(1.0, btn_bg.valueF() + 0.15))
-            btn_pen = QColor(bg); btn_pen.setHsvF(btn_pen.hsvHueF(), btn_pen.hsvSaturationF(), min(1.0, btn_pen.valueF() + 0.45))
-            btn_txt = QColor(bg); btn_txt.setHsvF(btn_txt.hsvHueF(), max(0.0, btn_txt.hsvSaturationF() - 0.2), min(1.0, btn_txt.valueF() + 0.6))
-            btn_hov = QColor(bg); btn_hov.setHsvF(btn_hov.hsvHueF(), btn_hov.hsvSaturationF(), min(1.0, btn_hov.valueF() + 0.28))
-
-            icon_color = btn_txt.name()
-            icon_size  = QSize(_BTN_SIZE - 14, _BTN_SIZE - 14)
-
-            lb = self._lib_btn_rect()
-            painter.setBrush(QBrush(btn_hov if self._hovered_btn == 'lib' else btn_bg))
-            painter.setPen(QPen(btn_pen, 1))
-            painter.drawRoundedRect(lb, 9, 9)
-            lib_pix = qta.icon('fa5s.layer-group', color=icon_color).pixmap(icon_size)
-            painter.drawPixmap(lb.center().x() - icon_size.width() // 2,
-                               lb.center().y() - icon_size.height() // 2, lib_pix)
-
-            rb = self._recall_btn_rect()
-            painter.setBrush(QBrush(btn_hov if self._hovered_btn == 'rcl' else btn_bg))
-            painter.setPen(QPen(btn_pen, 1))
-            painter.drawRoundedRect(rb, 9, 9)
-            rcl_pix = qta.icon('fa5s.undo-alt', color=icon_color).pixmap(icon_size)
-            painter.drawPixmap(rb.center().x() - icon_size.width() // 2,
-                               rb.center().y() - icon_size.height() // 2, rcl_pix)
-
-            ilb = self._img_lib_btn_rect()
-            painter.setBrush(QBrush(btn_hov if self._hovered_btn == 'img_lib' else btn_bg))
-            painter.setPen(QPen(btn_pen, 1))
-            painter.drawRoundedRect(ilb, 9, 9)
-            img_lib_pix = qta.icon('fa5s.images', color=icon_color).pixmap(icon_size)
-            painter.drawPixmap(ilb.center().x() - icon_size.width() // 2,
-                               ilb.center().y() - icon_size.height() // 2, img_lib_pix)
-
-            db = self._dice_btn_rect()
-            painter.setBrush(QBrush(btn_hov if self._hovered_btn == 'dice' else btn_bg))
-            painter.setPen(QPen(btn_pen, 1))
-            painter.drawRoundedRect(db, 9, 9)
-            dice_pix = qta.icon('fa5s.dice', color=icon_color).pixmap(icon_size)
-            painter.drawPixmap(db.center().x() - icon_size.width() // 2,
-                               db.center().y() - icon_size.height() // 2, dice_pix)
-
-            lgb = self._log_btn_rect()
-            painter.setBrush(QBrush(btn_hov if self._hovered_btn == 'log' else btn_bg))
-            painter.setPen(QPen(btn_pen, 1))
-            painter.drawRoundedRect(lgb, 9, 9)
-            log_pix = qta.icon('fa5s.scroll', color=icon_color).pixmap(icon_size)
-            painter.drawPixmap(lgb.center().x() - icon_size.width() // 2,
-                               lgb.center().y() - icon_size.height() // 2, log_pix)
-
-            npb = self._notepad_btn_rect()
-            painter.setBrush(QBrush(btn_hov if self._hovered_btn == 'notepad' else btn_bg))
-            painter.setPen(QPen(btn_pen, 1))
-            painter.drawRoundedRect(npb, 9, 9)
-            notepad_pix = qta.icon('fa5s.book-open', color=icon_color).pixmap(icon_size)
-            painter.drawPixmap(npb.center().x() - icon_size.width() // 2,
-                               npb.center().y() - icon_size.height() // 2, notepad_pix)
-
             rects = self._card_rects()
             n = len(rects)
 
-            # Compute ghost rect for reorder preview (drawn inside the card loop
-            # so the card at ins renders on top of the ghost)
             ghost_rect = None
             ghost_ins  = None
             if (self._reorder_mode and self._reorder_insert_pos is not None
@@ -428,7 +435,6 @@ class HandWidget(QWidget):
                 ghost_ins  = ins
 
             for i, (hs, rect) in enumerate(zip(self.hand_cards, rects)):
-                # Draw ghost just before card[ins] so that card overlaps the ghost
                 if ghost_rect is not None and i == ghost_ins:
                     painter.save()
                     painter.setOpacity(0.55)
@@ -436,10 +442,9 @@ class HandWidget(QWidget):
                     painter.setPen(QPen(QColor(140, 190, 255), 2))
                     painter.drawRoundedRect(ghost_rect, 5, 5)
                     painter.restore()
-                    ghost_rect = None  # mark drawn
+                    ghost_rect = None
                 self._draw_card(painter, hs, rect, i in self._selected, i == self._hovered_idx)
 
-            # ins == n: ghost goes after all cards, nothing overlaps it
             if ghost_rect is not None:
                 painter.save()
                 painter.setOpacity(0.55)
@@ -448,7 +453,6 @@ class HandWidget(QWidget):
                 painter.drawRoundedRect(ghost_rect, 5, 5)
                 painter.restore()
 
-        # Rubber-band selection rect
         if self._rubber_rect and not self._rubber_rect.isNull():
             painter.setPen(QPen(QColor(100, 180, 255, 220), 1, Qt.PenStyle.DashLine))
             painter.setBrush(QBrush(QColor(100, 180, 255, 35)))
@@ -458,7 +462,7 @@ class HandWidget(QWidget):
 
     def _draw_card(
         self, painter: QPainter, hs: HandCardState,
-        rect: QRect, selected: bool, hovered: bool
+        rect: QRect, selected: bool, hovered: bool,
     ) -> None:
         cx = rect.center().x()
         cy = rect.center().y()
@@ -481,7 +485,6 @@ class HandWidget(QWidget):
             painter.drawText(draw_rect, Qt.AlignmentFlag.AlignCenter,
                              hs.card_data.name[:20])
 
-        # Border
         r = 5
         if selected:
             pen = QPen(QColor(255, 215, 0), 2)
@@ -492,7 +495,6 @@ class HandWidget(QWidget):
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRoundedRect(draw_rect, r, r)
-
         painter.restore()
 
     # ------------------------------------------------------------------
@@ -500,41 +502,11 @@ class HandWidget(QWidget):
     # ------------------------------------------------------------------
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
-        # Tab strip click — toggle collapse
-        if event.button() == Qt.MouseButton.LeftButton:
-            if event.pos().y() < TAB_HEIGHT:
-                self.toggle_collapse()
-                return
-        if self._collapsed:
-            return
-
-        # Side buttons
-        if event.button() == Qt.MouseButton.LeftButton:
-            if self._lib_btn_rect().contains(event.pos()):
-                self.library_button_clicked.emit()
-                return
-            if self._recall_btn_rect().contains(event.pos()):
-                self.recall_clicked.emit()
-                return
-            if self._img_lib_btn_rect().contains(event.pos()):
-                self.image_library_clicked.emit()
-                return
-            if self._dice_btn_rect().contains(event.pos()):
-                self.dice_library_clicked.emit()
-                return
-            if self._log_btn_rect().contains(event.pos()):
-                self.roll_log_clicked.emit()
-                return
-            if self._notepad_btn_rect().contains(event.pos()):
-                self.notepad_clicked.emit()
-                return
-
         idx = self._index_at(event.position())
         if event.button() == Qt.MouseButton.LeftButton:
             if idx is not None:
                 mods = event.modifiers()
                 if mods & Qt.KeyboardModifier.ShiftModifier and self._last_clicked_idx is not None:
-                    # Range select from anchor to current
                     lo = min(self._last_clicked_idx, idx)
                     hi = max(self._last_clicked_idx, idx)
                     self._selected.update(range(lo, hi + 1))
@@ -546,8 +518,6 @@ class HandWidget(QWidget):
                     self._last_clicked_idx = idx
                 else:
                     if idx in self._selected and len(self._selected) > 1:
-                        # Clicked inside existing multi-selection — defer deselect
-                        # until release so drag can carry all selected cards
                         self._pending_deselect = True
                     else:
                         self._selected = {idx}
@@ -559,7 +529,6 @@ class HandWidget(QWidget):
                 self._selected.clear()
                 self._last_clicked_idx = None
                 self._drag_start_idx = None
-                # Start rubber-band selection on empty area
                 self._rubber_active = True
                 self._rubber_origin = event.position()
                 self._rubber_rect = None
@@ -572,27 +541,6 @@ class HandWidget(QWidget):
             self._show_context_menu(idx, event.globalPosition().toPoint())
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        if self._collapsed:
-            return
-        # Track button hover for highlight
-        pos = event.pos()
-        if self._lib_btn_rect().contains(pos):
-            new_hov = 'lib'
-        elif self._recall_btn_rect().contains(pos):
-            new_hov = 'rcl'
-        elif self._img_lib_btn_rect().contains(pos):
-            new_hov = 'img_lib'
-        elif self._dice_btn_rect().contains(pos):
-            new_hov = 'dice'
-        elif self._log_btn_rect().contains(pos):
-            new_hov = 'log'
-        elif self._notepad_btn_rect().contains(pos):
-            new_hov = 'notepad'
-        else:
-            new_hov = None
-        if new_hov != self._hovered_btn:
-            self._hovered_btn = new_hov
-        # Update card hover and emit signals on change
         old_idx = self._hovered_idx
         self._hovered_idx = self._index_at(event.position())
         if self._hovered_idx != old_idx:
@@ -615,10 +563,10 @@ class HandWidget(QWidget):
             self.update()
             return
 
-        # Reorder mode — track insert position or bail out to canvas drag
+        # Reorder mode
         if self._reorder_mode and event.buttons() & Qt.MouseButton.LeftButton:
             if event.position().y() < 0:
-                # Mouse left top of hand — switch to canvas drag
+                # Dragged above panel — switch to canvas drag
                 self._reorder_mode = False
                 self._reorder_insert_pos = None
                 idx = self._reorder_drag_idx
@@ -638,15 +586,15 @@ class HandWidget(QWidget):
             dist = (event.position() - self._drag_start_pos).manhattanLength()
             if dist > 8:
                 self._pending_deselect = False
-                if event.position().y() >= TAB_HEIGHT:
-                    # Still within hand — enter reorder mode
+                if event.position().y() >= 0:
+                    # Still over panel — enter reorder mode
                     self._reorder_mode = True
                     self._reorder_drag_idx = self._drag_start_idx
                     self._drag_start_idx = None
                     self._drag_start_pos = None
                     self._update_reorder_insert_pos(event.position().x())
                 else:
-                    # Dragged above hand — canvas drag
+                    # Dragged above panel — canvas drag
                     self._start_drag(self._drag_start_idx)
                     self._drag_start_idx = None
                     self._drag_start_pos = None
@@ -673,10 +621,8 @@ class HandWidget(QWidget):
     def leaveEvent(self, event) -> None:
         had_hover = self._hovered_idx is not None
         self._hovered_idx = None
-        self._hovered_btn = None
         if had_hover:
             self.hand_card_unhovered.emit()
-        # Cancel rubber band on leave; reorder handled by mouseMoveEvent (y < 0 check)
         if self._rubber_active:
             self._rubber_active = False
             self._rubber_rect = None
@@ -684,44 +630,16 @@ class HandWidget(QWidget):
         self.update()
 
     def clear_selection(self) -> None:
-        """Deselect all hand cards (called when user clicks on canvas)."""
         if self._selected:
             self._selected.clear()
             self._last_clicked_idx = None
             self.update()
 
     # ------------------------------------------------------------------
-    # Tooltip for side buttons
-    # ------------------------------------------------------------------
-
-    def event(self, ev) -> bool:
-        if ev.type() == QEvent.Type.ToolTip and not self._collapsed:
-            pos = ev.pos()
-            if self._lib_btn_rect().contains(pos):
-                QToolTip.showText(ev.globalPos(), "Deck Library", self)
-            elif self._recall_btn_rect().contains(pos):
-                QToolTip.showText(ev.globalPos(), "Recall Cards", self)
-            elif self._img_lib_btn_rect().contains(pos):
-                QToolTip.showText(ev.globalPos(), "Image Library", self)
-            elif self._dice_btn_rect().contains(pos):
-                QToolTip.showText(ev.globalPos(), "Dice Library", self)
-            elif self._log_btn_rect().contains(pos):
-                QToolTip.showText(ev.globalPos(), "Roll Log", self)
-            elif self._notepad_btn_rect().contains(pos):
-                QToolTip.showText(ev.globalPos(), "Notepad", self)
-            else:
-                QToolTip.hideText()
-            return True
-        return super().event(ev)
-
-    # ------------------------------------------------------------------
-    # Keyboard (flip / rotate selected)
+    # Keyboard
     # ------------------------------------------------------------------
 
     def keyPressEvent(self, event) -> None:
-        if self._collapsed:
-            super().keyPressEvent(event)
-            return
         key_str = _hk(event)
         settings = self._settings
         if key_str == settings.hotkey("flip"):
@@ -738,7 +656,6 @@ class HandWidget(QWidget):
             super().keyPressEvent(event)
 
     def _stack_selected_emit(self) -> None:
-        """Remove selected hand cards and emit them for canvas stacking."""
         indices = sorted(self._selected)
         cards = [
             (self.hand_cards[i].card_data, self.hand_cards[i].face_up)
@@ -746,12 +663,13 @@ class HandWidget(QWidget):
         ]
         if len(cards) < 2:
             return
-        self.request_undo_snapshot.emit()  # snapshot before hand state changes
+        self.request_undo_snapshot.emit()
         for i in sorted(indices, reverse=True):
             if 0 <= i < len(self.hand_cards):
                 self.hand_cards.pop(i)
         self._selected.clear()
         self._last_clicked_idx = None
+        self._after_cards_changed()
         self.update()
         self.stack_to_canvas_requested.emit(cards)
 
@@ -764,9 +682,7 @@ class HandWidget(QWidget):
     def _rotate_selected(self, degrees: float) -> None:
         for i in self._selected:
             if 0 <= i < len(self.hand_cards):
-                self.hand_cards[i].rotation = (
-                    self.hand_cards[i].rotation + degrees
-                ) % 360
+                self.hand_cards[i].rotation = (self.hand_cards[i].rotation + degrees) % 360
         self.update()
 
     def _remove_selected(self) -> None:
@@ -776,6 +692,7 @@ class HandWidget(QWidget):
                 hs = self.hand_cards.pop(i)
                 self.return_to_deck.emit(hs.card_data)
         self._selected.clear()
+        self._after_cards_changed()
         self.update()
 
     # ------------------------------------------------------------------
@@ -794,17 +711,16 @@ class HandWidget(QWidget):
         self.update()
 
     def _do_reorder(self) -> None:
-        insert = self._reorder_insert_pos
+        insert   = self._reorder_insert_pos
         drag_idx = self._reorder_drag_idx
         if insert is None or drag_idx is None or drag_idx >= len(self.hand_cards):
             return
-        is_multi = len(self._selected) > 1 and drag_idx in self._selected
+        is_multi     = len(self._selected) > 1 and drag_idx in self._selected
         moving_indices = sorted(self._selected) if is_multi else [drag_idx]
         moving_cards = [self.hand_cards[i] for i in moving_indices if 0 <= i < len(self.hand_cards)]
-        moving_set = set(moving_indices)
-        remaining = [c for i, c in enumerate(self.hand_cards) if i not in moving_set]
-        # Adjust insert: subtract how many moving cards were before the insert point
-        adj_insert = max(0, min(insert - sum(1 for i in moving_indices if i < insert), len(remaining)))
+        moving_set   = set(moving_indices)
+        remaining    = [c for i, c in enumerate(self.hand_cards) if i not in moving_set]
+        adj_insert   = max(0, min(insert - sum(1 for i in moving_indices if i < insert), len(remaining)))
         self.hand_cards = remaining[:adj_insert] + moving_cards + remaining[adj_insert:]
         self._selected = set(range(adj_insert, adj_insert + len(moving_cards)))
         self._last_clicked_idx = adj_insert
@@ -818,8 +734,6 @@ class HandWidget(QWidget):
         if idx < 0 or idx >= len(self.hand_cards):
             return
         hs = self.hand_cards[idx]
-
-        # Multi-select drag: pack all selected cards
         is_multi = len(self._selected) > 1 and idx in self._selected
         mime = QMimeData()
 
@@ -829,18 +743,12 @@ class HandWidget(QWidget):
                 if 0 <= i < len(self.hand_cards)
             ]
             cards_list = [
-                {
-                    "image_path": h.card_data.image_path,
-                    "deck_id":    h.card_data.deck_id,
-                    "face_up":    h.face_up,
-                    "rotation":   h.rotation,
-                }
+                {"image_path": h.card_data.image_path, "deck_id": h.card_data.deck_id,
+                 "face_up": h.face_up, "rotation": h.rotation}
                 for h in selected_states
             ]
-            mime.setData(
-                "application/x-solocanvas-cards",
-                json.dumps(cards_list).encode("utf-8"),
-            )
+            mime.setData("application/x-solocanvas-cards",
+                         json.dumps(cards_list).encode("utf-8"))
         else:
             card_dict = {
                 "image_path": hs.card_data.image_path,
@@ -848,13 +756,10 @@ class HandWidget(QWidget):
                 "face_up":    hs.face_up,
                 "rotation":   hs.rotation,
             }
-            mime.setData(
-                "application/x-solocanvas-card",
-                json.dumps(card_dict).encode("utf-8"),
-            )
+            mime.setData("application/x-solocanvas-card",
+                         json.dumps(card_dict).encode("utf-8"))
 
-        # Thumbnail for drag
-        pix = hs.current_pixmap()
+        pix  = hs.current_pixmap()
         drag = QDrag(self)
         drag.setMimeData(mime)
         if pix and not pix.isNull():
@@ -873,6 +778,7 @@ class HandWidget(QWidget):
                 self._last_clicked_idx = None
             else:
                 self.remove_card_by_image_path(hs.card_data.image_path)
+            self._after_cards_changed()
             self.update()
 
     # ------------------------------------------------------------------
@@ -881,23 +787,22 @@ class HandWidget(QWidget):
 
     def _show_context_menu(self, idx: Optional[int], global_pos) -> None:
         menu = QMenu()
-
         n_sel = len(self._selected)
 
         if idx is not None and 0 <= idx < len(self.hand_cards):
-            menu.addAction("Flip",     lambda: self._flip_one(idx))
+            menu.addAction("Flip",       lambda: self._flip_one(idx))
             menu.addAction("Rotate CW",  lambda: self._rotate_one(idx, 45))
             menu.addAction("Rotate CCW", lambda: self._rotate_one(idx, -45))
             menu.addSeparator()
-            menu.addAction("Send to Canvas",  lambda: self._send_to_canvas(idx))
-            menu.addAction("Return to Deck",  lambda: self._return_one_to_deck(idx))
+            menu.addAction("Send to Canvas", lambda: self._send_to_canvas(idx))
+            menu.addAction("Return to Deck", lambda: self._return_one_to_deck(idx))
 
             if n_sel > 1:
                 menu.addSeparator()
                 lbl = f"{n_sel} Selected Cards"
-                menu.addAction(f"Flip {lbl}",              self._flip_selected)
-                menu.addAction(f"Send {lbl} to Canvas",    self._send_selected_to_canvas)
-                menu.addAction(f"Return {lbl} to Deck",    self._return_selected_to_deck)
+                menu.addAction(f"Flip {lbl}",           self._flip_selected)
+                menu.addAction(f"Send {lbl} to Canvas", self._send_selected_to_canvas)
+                menu.addAction(f"Return {lbl} to Deck", self._return_selected_to_deck)
 
         menu.exec(global_pos)
 
@@ -914,6 +819,7 @@ class HandWidget(QWidget):
         self._selected.discard(idx)
         self._selected = {j if j < idx else j - 1 for j in self._selected if j != idx}
         self.send_to_canvas.emit(hs.card_data, QPointF(0, 0))
+        self._after_cards_changed()
         self.update()
 
     def _return_one_to_deck(self, idx: int) -> None:
@@ -921,6 +827,7 @@ class HandWidget(QWidget):
             hs = self.hand_cards.pop(idx)
             self._selected.discard(idx)
             self.return_to_deck.emit(hs.card_data)
+            self._after_cards_changed()
             self.update()
 
     def _send_selected_to_canvas(self) -> None:
@@ -930,6 +837,7 @@ class HandWidget(QWidget):
                 self.send_to_canvas.emit(hs.card_data, QPointF(0, 0))
         self._selected.clear()
         self._last_clicked_idx = None
+        self._after_cards_changed()
         self.update()
 
     def _return_selected_to_deck(self) -> None:
@@ -939,6 +847,7 @@ class HandWidget(QWidget):
                 self.return_to_deck.emit(hs.card_data)
         self._selected.clear()
         self._last_clicked_idx = None
+        self._after_cards_changed()
         self.update()
 
     # ------------------------------------------------------------------
@@ -955,7 +864,7 @@ class HandWidget(QWidget):
         if not event.mimeData().hasFormat("application/x-solocanvas-card"):
             event.ignore()
             return
-        # The MainWindow handles actual card movement on canvas→hand drags
+        # MainWindow handles actual card movement via items_dropped_on_hand signal
         event.acceptProposedAction()
 
     # ------------------------------------------------------------------

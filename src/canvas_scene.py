@@ -218,7 +218,8 @@ class CanvasScene(QGraphicsScene):
 
     def _draw_grid(self, painter: QPainter, rect: QRectF) -> None:
         g = self.grid_size
-        pen = QPen(QColor(self.grid_color), 0.5, Qt.PenStyle.SolidLine)
+        pen = QPen(QColor(self.grid_color), 1, Qt.PenStyle.SolidLine)
+        pen.setCosmetic(True)
         painter.setPen(pen)
 
         left   = int(rect.left()   / g) * g - g

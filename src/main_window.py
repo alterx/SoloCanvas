@@ -40,110 +40,25 @@ from .deck_item      import DeckItem
 from .dialogs        import (
     BackgroundDialog, CardPickerDialog, DeckLibraryDialog,
     DiceLibraryDialog, HotkeyReferenceDialog, ImageLibraryDialog,
-    ImageResizeDialog, ImageSizeDialog, MissingImageDialog, RecallDialog,
+    ImageResizeDialog, ImageSizeDialog, MeasurementSettingsDialog,
+    MissingImageDialog, RecallDialog,
     RollLogDialog, SessionPickerDialog, SettingsDialog, StartupDialog,
 )
+from .measurement_item import MeasurementItem
+from .drawing_item import DrawingStrokeItem, DrawingShapeItem, make_smooth_path
+from .drawing_settings_dialog import DrawingSettingsDialog
 from .image_item     import ImageItem
 from .die_item       import DieItem
 from .dice_manager   import DiceSetsManager
-from .hand_widget    import HandWidget
+from .hand_widget    import HandWidget, _HAND_MARGIN_BOTTOM
 from .models         import CardData, DeckModel
 from .session_manager  import SessionManager
 from .settings_manager import SettingsManager
 from .notepad_dialog   import NotepadDialog
+from .pdf_viewer       import PDFViewerWindow
 from . import theme as _theme
+from .floating_toolbar import FloatingToolbar, BUTTONS as _TB_BUTTONS
 
-_WINDOW_STYLE = """
-QMainWindow, QWidget#central {
-    background-color: #11111b;
-}
-
-/* ── Menu bar ── */
-QMenuBar {
-    background-color: #1e1e2e;
-    color: #cdd6f4;
-    border-bottom: 1px solid #313244;
-    font-size: 13px;
-    padding: 2px 0;
-}
-QMenuBar::item { padding: 4px 10px; border-radius: 4px; }
-QMenuBar::item:selected { background: #313244; }
-
-/* ── Drop-down menus ── */
-QMenu {
-    background-color: #1e1e2e;
-    color: #cdd6f4;
-    border: 1px solid #45475a;
-    font-size: 13px;
-    padding: 4px 0;
-}
-QMenu::item { padding: 5px 24px 5px 12px; border-radius: 4px; }
-QMenu::item:selected { background: #313244; }
-QMenu::item:disabled { color: #585b70; }
-QMenu::separator { height: 1px; background: #45475a; margin: 3px 8px; }
-QMenu::indicator { width: 14px; height: 14px; }
-
-/* ── Status bar ── */
-QStatusBar {
-    background-color: #1e1e2e;
-    color: #a6adc8;
-    font-size: 11px;
-    border-top: 1px solid #313244;
-}
-
-/* ── Scrollbars ── */
-QScrollBar:vertical {
-    background: #11111b;
-    width: 8px;
-    border: none;
-    margin: 0;
-}
-QScrollBar::handle:vertical {
-    background: #585b70;
-    border-radius: 4px;
-    min-height: 30px;
-}
-QScrollBar::handle:vertical:hover { background: #6c7086; }
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; border: none; }
-QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
-
-QScrollBar:horizontal {
-    background: #11111b;
-    height: 8px;
-    border: none;
-    margin: 0;
-}
-QScrollBar::handle:horizontal {
-    background: #585b70;
-    border-radius: 4px;
-    min-width: 30px;
-}
-QScrollBar::handle:horizontal:hover { background: #6c7086; }
-QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; border: none; }
-QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }
-
-/* ── Tooltip ── */
-QToolTip {
-    background-color: #313244;
-    color: #cdd6f4;
-    border: 1px solid #45475a;
-    padding: 4px 8px;
-    font-size: 12px;
-}
-
-/* ── Generic push buttons (fallback) ── */
-QPushButton {
-    background-color: #313244;
-    color: #cdd6f4;
-    border: 1px solid #45475a;
-    border-radius: 5px;
-    padding: 5px 14px;
-    font-size: 13px;
-}
-QPushButton:hover  { background-color: #45475a; }
-QPushButton:pressed { background-color: #585b70; }
-QPushButton:disabled { color: #585b70; border-color: #313244; }
-"""
 
 
 class MagnifyOverlay(QWidget):
@@ -209,6 +124,36 @@ class MagnifyOverlay(QWidget):
         painter.end()
 
 
+class _DimensionBubble(QWidget):
+    """Small floating label that shows the current measurement value."""
+
+    def __init__(self, parent: QWidget):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._text = ""
+        self.setFixedSize(120, 28)
+        self.hide()
+
+    def set_text(self, text: str) -> None:
+        self._text = text
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        if not self._text:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(QColor(15, 15, 25, 210))
+        painter.setPen(QPen(QColor(191, 163, 129), 1))
+        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 6, 6)
+        font = QFont("Arial", 10, QFont.Weight.Bold)
+        painter.setFont(font)
+        painter.setPen(QPen(QColor("#FFFFFF")))
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._text)
+        painter.end()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -222,6 +167,10 @@ class MainWindow(QMainWindow):
         self._active_deck_id: Optional[str]     = None
         self._session_path: Optional[Path]      = None
         self._magnify_key_held = False
+        self._was_maximized = False
+        self._fs_menu_timer = QTimer(self)
+        self._fs_menu_timer.setInterval(100)
+        self._fs_menu_timer.timeout.connect(self._check_fullscreen_menu)
 
         # Dice
         self._dice_manager = DiceSetsManager()
@@ -232,9 +181,14 @@ class MainWindow(QMainWindow):
 
         # Image items
         self._image_items: List[ImageItem] = []
+        self._image_cascade_col: int = 0
+        self._image_cascade_row: int = 0
 
         # Clipboard for copy/paste (list of {"type": str, "state": dict})
         self._clipboard: list = []
+        self._clipboard_time: float = 0.0        # when internal clipboard was last written
+        self._sys_clipboard_time: float = 0.0    # when system clipboard last changed
+        QApplication.clipboard().dataChanged.connect(self._on_sys_clipboard_changed)
 
         # Non-modal dialog tracking (prevents GC, allows raise-on-reopen)
         self._active_dialogs: set = set()
@@ -242,10 +196,24 @@ class MainWindow(QMainWindow):
         self._roll_log_dlg = None
         self._image_library_dlg = None
         self._notepad_dlg: Optional[NotepadDialog] = None
+        self._pdf_dlg: Optional[PDFViewerWindow] = None
 
-        # Undo / redo (snapshot-based, max 10 levels)
+        # Undo / redo (snapshot-based, configurable max levels)
         self._undo_stack: list = []
         self._redo_stack: list = []
+
+        # Drawing tool
+        self._drawing_items: list = []            # all DrawingStrokeItem / DrawingShapeItem on canvas
+        self._active_draw_points: list = []       # freehand points being collected
+        self._active_draw_stroke = None           # live DrawingStrokeItem during freehand drag
+        self._active_draw_shape  = None           # live DrawingShapeItem during shape drag
+        self._draw_start_pos     = None           # QPointF where current shape drag started
+        self._draw_settings_dlg  = None           # DrawingSettingsDialog (non-modal, persistent)
+
+        # Measurement tool
+        self._active_measurement: Optional[MeasurementItem] = None  # item being drawn
+        self._frozen_measurements: List[MeasurementItem] = []       # on-canvas frozen items
+        self._measure_persistent: bool = False  # if True, frozen measurements survive canvas clicks
 
         self._setup_ui()
         self._setup_menu()
@@ -267,7 +235,7 @@ class MainWindow(QMainWindow):
         central.setObjectName("central")
         self.setCentralWidget(central)
 
-        # Layout: canvas view fills available space, hand strip is below it
+        # Layout: canvas view fills all available space
         layout = QVBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -276,13 +244,21 @@ class MainWindow(QMainWindow):
         self._view  = CanvasView(self._scene, self._settings)
         layout.addWidget(self._view, 1)
 
-        self._hand = HandWidget(self._settings)
-        layout.addWidget(self._hand, 0)
+        # Floating hand panel – child of central, centred at bottom
+        self._hand = HandWidget(self._settings, central)
+
+        # Floating toolbar – child of central, anchored top-right (above hand)
+        self._toolbar = FloatingToolbar(self._settings, central)
+        self._toolbar.raise_()
 
         # Magnify overlay – child of central, raised above everything
         self._magnify = MagnifyOverlay(central)
         self._magnify.set_size(self._settings.display("magnify_size"))
         self._magnify.raise_()
+
+        # Dimension bubble — shows current measurement value during drawing
+        self._dim_bubble = _DimensionBubble(central)
+        self._dim_bubble.raise_()
 
         # Status bar
         self._status = QStatusBar()
@@ -300,6 +276,8 @@ class MainWindow(QMainWindow):
         self._scene.external_image_dropped.connect(self._on_external_image_dropped)
         self._view.zoom_changed.connect(self._on_zoom_changed)
         self._view.key_action.connect(self._dispatch_key)
+        self._view.key_release_action.connect(self._dispatch_key_release)
+        self._r_held: bool = False
         self._view.rotate_held_item.connect(self._rotate_held)
         self._view.items_dropped_on_hand.connect(self._on_canvas_items_dropped_on_hand)
         self._view.items_merged_into_deck.connect(self._on_items_merged_into_deck)
@@ -307,17 +285,39 @@ class MainWindow(QMainWindow):
 
         self._hand.send_to_canvas.connect(self._on_hand_send_to_canvas)
         self._hand.return_to_deck.connect(self._on_hand_return_to_deck)
-        self._hand.library_button_clicked.connect(self._open_deck_library)
-        self._hand.recall_clicked.connect(self._recall_dialog)
         self._hand.stack_to_canvas_requested.connect(self._on_hand_stack_to_canvas)
         self._hand.request_undo_snapshot.connect(self._push_undo)
-        self._hand.dice_library_clicked.connect(self._open_dice_library)
-        self._hand.roll_log_clicked.connect(self._open_roll_log)
-        self._hand.image_library_clicked.connect(self._open_image_library)
-        self._hand.notepad_clicked.connect(self._open_notepad)
         self._hand.hand_card_hovered.connect(self._on_card_hovered)
         self._hand.hand_card_unhovered.connect(self._on_card_unhovered)
+
+        self._toolbar.hand_clicked.connect(self._toggle_hand_widget)
+        self._toolbar.lib_clicked.connect(self._open_deck_library)
+        self._toolbar.rcl_clicked.connect(self._recall_dialog)
+        self._toolbar.img_lib_clicked.connect(self._open_image_library)
+        self._toolbar.dice_clicked.connect(self._open_dice_library)
+        self._toolbar.log_clicked.connect(self._open_roll_log)
+        self._toolbar.notepad_clicked.connect(self._open_notepad)
+        self._toolbar.pdf_clicked.connect(self._open_pdf_viewer)
+        self._toolbar.tool_changed.connect(self._on_toolbar_tool_changed)
+        self._toolbar.measure_mode_changed.connect(self._on_measure_mode_changed)
+        self._toolbar.measure_type_changed.connect(self._on_measure_type_changed)
+        self._toolbar.draw_tool_changed.connect(self._on_draw_tool_changed)
+        self._toolbar.draw_trash_requested.connect(self._clear_all_drawings)
+
+        self._hand.visibility_changed.connect(self._toolbar.set_hand_visible)
+        self._hand.hand_card_count_changed.connect(self._toolbar.set_hand_card_count)
+
+        self._view.measurement_toggled.connect(self._on_measurement_toggled)
+        self._view.measurement_press.connect(self._on_measurement_press)
+        self._view.measurement_move.connect(self._on_measurement_move)
+        self._view.measurement_release.connect(self._on_measurement_release)
+        self._view.measurement_waypoint.connect(self._on_measurement_waypoint)
+        self._view.draw_press.connect(self._on_draw_press)
+        self._view.draw_move.connect(self._on_draw_move)
+        self._view.draw_release.connect(self._on_draw_release)
+        self._view.draw_cancel.connect(self._on_draw_cancel)
         self._view.canvas_pressed.connect(self._hand.clear_selection)
+        self._view.canvas_pressed.connect(self._on_canvas_interaction)
 
         # Auto-magnify on mouse move in canvas
         self._view.viewport().setMouseTracking(True)
@@ -380,12 +380,60 @@ class MainWindow(QMainWindow):
         act(tools_menu, "Deck Library…", self._open_deck_library,  "Ctrl+L")
         act(tools_menu, "Image Library…",self._open_image_library)
         act(tools_menu, "Dice Bag…",     self._open_dice_library)
+        act(tools_menu, "PDF Viewer…",   self._open_pdf_viewer)
+
+        # Measure
+        measure_menu = mb.addMenu("&Measure")
+        self._measure_actions: Dict[str, QAction] = {}
+        for mtype, label in [("line", "Line"), ("area", "Area"), ("cone", "Cone")]:
+            a = QAction(label, self)
+            a.setCheckable(True)
+            a.triggered.connect(lambda checked, t=mtype: self._set_measure_type_from_menu(t))
+            measure_menu.addAction(a)
+            self._measure_actions[mtype] = a
+        measure_menu.addSeparator()
+        self._measure_grid_action = QAction("Grid Mode", self)
+        self._measure_grid_action.setCheckable(True)
+        self._measure_grid_action.triggered.connect(
+            lambda checked: self._set_measure_mode_from_menu("grid" if checked else "free")
+        )
+        measure_menu.addAction(self._measure_grid_action)
+        measure_menu.addSeparator()
+        self._measure_persistent_action = QAction("Persistent", self)
+        self._measure_persistent_action.setCheckable(True)
+        self._measure_persistent_action.setChecked(False)
+        self._measure_persistent_action.triggered.connect(self._on_measure_persistent_toggled)
+        measure_menu.addAction(self._measure_persistent_action)
+        measure_menu.addSeparator()
+        act(measure_menu, "Clear Measurements", self._clear_all_measurements)
+        measure_menu.addSeparator()
+        act(measure_menu, "Measurement Settings…", self._open_measurement_settings)
+        self._update_measure_menu_state()
+
+        # Toolbar visibility
+        toolbar_menu = mb.addMenu("Tool&bar")
+        for bid, _icon, label in _TB_BUTTONS:
+            a = QAction(label, self)
+            a.setCheckable(True)
+            a.setChecked(self._settings.toolbar("button_visibility").get(bid, True))
+            a.triggered.connect(
+                lambda checked, b=bid: self._toolbar.set_button_visible(b, checked)
+            )
+            toolbar_menu.addAction(a)
 
         # Help
         help_menu = mb.addMenu("&Help")
         act(help_menu, "Hotkey Reference…  (K)", self._open_hotkey_reference)
         help_menu.addSeparator()
         act(help_menu, "About SoloCanvas", self._about)
+
+        # Drop shadow beneath the menu bar
+        from PyQt6.QtWidgets import QGraphicsDropShadowEffect
+        mb_shadow = QGraphicsDropShadowEffect(mb)
+        mb_shadow.setBlurRadius(12)
+        mb_shadow.setOffset(0, 4)
+        mb_shadow.setColor(QColor(0, 0, 0, 140))
+        mb.setGraphicsEffect(mb_shadow)
 
     def _setup_shortcuts(self) -> None:
         pass  # Key dispatch handled via canvas_view.key_action signal
@@ -400,6 +448,14 @@ class MainWindow(QMainWindow):
             i for i in self._scene.selectedItems()
             if isinstance(i, (CardItem, DeckItem, ImageItem))
         ]
+
+        if key_str == "Escape":
+            if self._view.measurement_active:
+                self._cancel_active_measurement()
+                self._view._measuring = False
+            if self._view.drawing_active:
+                self._on_draw_cancel()
+            return
 
         if key_str == s.hotkey("flip"):
             if selected_cards:
@@ -449,14 +505,17 @@ class MainWindow(QMainWindow):
                     self._push_undo()
                     hovered_deck.shuffle()
             # Roll selected dice (simultaneously with or without selected decks)
+            self._r_held = True
             if len(selected_dice) > 1:
                 # Group roll — suppress individual signals and log as one entry
                 for die in selected_dice:
                     die._log_individual = False
+                    die.keep_rolling = True
                     die.roll()
                 self._append_roll_log(selected_dice)
             else:
                 for die in selected_dice:
+                    die.keep_rolling = True
                     die.roll()
 
         elif key_str in [s.hotkey(f"draw_{n}") for n in range(1, 10)]:
@@ -530,7 +589,7 @@ class MainWindow(QMainWindow):
             self._open_hotkey_reference()
 
         elif key_str == s.hotkey("hand_toggle"):
-            self._hand.toggle_collapse()
+            self._toggle_hand_widget()
 
         elif key_str == s.hotkey("lock_toggle"):
             lockable = [i for i in selected_cards if hasattr(i, "_toggle_lock")]
@@ -562,15 +621,48 @@ class MainWindow(QMainWindow):
         elif key_str == s.hotkey("open_dice_bag"):
             self._open_dice_library()
 
+    def _dispatch_key_release(self, key_str: str) -> None:
+        if key_str != self._settings.hotkey("shuffle"):
+            return
+        self._r_held = False
+        # Clear keep_rolling on every die in the scene so the current
+        # animation completes normally and the die settles.
+        for item in self._scene.items():
+            if isinstance(item, DieItem) and item.keep_rolling:
+                item.keep_rolling = False
+
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_F11:
             if self.isFullScreen():
-                self.showNormal()
+                self._fs_menu_timer.stop()
+                self.menuBar().setVisible(True)
+                if self._was_maximized:
+                    self.showMaximized()
+                else:
+                    self.showNormal()
             else:
+                self._was_maximized = self.isMaximized()
                 self.showFullScreen()
+                self.menuBar().setVisible(False)
+                self._fs_menu_timer.start()
             event.accept()
             return
         super().keyPressEvent(event)
+
+    def _check_fullscreen_menu(self) -> None:
+        """Show/hide the menu bar based on cursor proximity to the top edge."""
+        if not self.isFullScreen():
+            self._fs_menu_timer.stop()
+            return
+        from PyQt6.QtGui import QCursor
+        # Keep visible if a menu is currently open
+        if self.menuBar().activeAction():
+            return
+        cursor_y = QCursor.pos().y()
+        win_top  = self.geometry().y()
+        should_show = cursor_y <= win_top + 3
+        if should_show != self.menuBar().isVisible():
+            self.menuBar().setVisible(should_show)
 
     def _rotate_held(self, direction: int) -> None:
         if self._view._held_item:
@@ -671,6 +763,8 @@ class MainWindow(QMainWindow):
         di.stack_requested.connect(self._on_stack_requested)
         di.before_draw.connect(self._push_undo)
         di.duplicate_requested.connect(self._on_deck_duplicate)
+        di.delete_requested.connect(self._on_deck_delete)
+        di.open_recall_requested.connect(self._recall_dialog)
 
     # ------------------------------------------------------------------
     # Dice management
@@ -693,6 +787,9 @@ class MainWindow(QMainWindow):
         dlg.spawn_requested.connect(self._on_image_spawn)
         dlg.rename_requested.connect(self._on_image_rename)
         dlg.delete_from_library_requested.connect(self._on_library_image_deleted)
+        dlg.remove_from_scene_requested.connect(self._on_image_remove_from_scene)
+        self._image_cascade_col = 0
+        self._image_cascade_row = 0
         self._image_library_dlg = dlg
         self._show_nonmodal(dlg)
 
@@ -702,14 +799,26 @@ class MainWindow(QMainWindow):
     def _on_image_spawn(self, path: str) -> None:
         from PyQt6.QtCore import QPoint
         grid_size = self._settings.canvas("grid_size")
+        step = grid_size * 2
         top_left = self._view.mapToScene(QPoint(0, 0))
+        vp_height = self._view.viewport().height()
+
+        x = top_left.x() + self._image_cascade_col * step
+        y = top_left.y() + self._image_cascade_row * step
+
         default_sz = self._settings.display("image_import_size")
         item = ImageItem(path, h_cells=default_sz, grid_size=grid_size)
         item.grid_snap = self._settings.canvas("grid_snap")
-        item.setPos(top_left)
+        item.setPos(QPointF(x, y))
         self._connect_image_item(item)
         self._scene.addItem(item)
         self._image_items.append(item)
+
+        self._image_cascade_row += 1
+        if top_left.y() + self._image_cascade_row * step + step > top_left.y() + vp_height:
+            self._image_cascade_row = 0
+            self._image_cascade_col += 1
+
         if self._image_library_dlg and self._image_library_dlg.isVisible():
             self._image_library_dlg.refresh()
 
@@ -721,6 +830,15 @@ class MainWindow(QMainWindow):
         dlg = DiceLibraryDialog(self._dice_manager, self._settings, self)
         dlg.dice_requested.connect(self._on_dice_requested)
         self._dice_library_dlg = dlg
+        self._show_nonmodal(dlg)
+
+    def _open_pdf_viewer(self) -> None:
+        if self._pdf_dlg and self._pdf_dlg.isVisible():
+            self._pdf_dlg.raise_()
+            self._pdf_dlg.activateWindow()
+            return
+        dlg = PDFViewerWindow(self._settings, self)
+        self._pdf_dlg = dlg
         self._show_nonmodal(dlg)
 
     def _on_dice_requested(self, dice_list: list) -> None:
@@ -777,7 +895,15 @@ class MainWindow(QMainWindow):
         self._die_items.append(new_di)
 
     def _on_image_duplicate(self, item: ImageItem) -> None:
-        g = self._settings.canvas("grid_size")
+        from PyQt6.QtCore import QPoint
+        grid_size = self._settings.canvas("grid_size")
+        step = grid_size * 2
+        top_left = self._view.mapToScene(QPoint(0, 0))
+        vp_height = self._view.viewport().height()
+
+        x = top_left.x() + self._image_cascade_col * step
+        y = top_left.y() + self._image_cascade_row * step
+
         new_item = ImageItem(
             item._image_path,
             w_cells=item._w_cells,
@@ -789,10 +915,15 @@ class MainWindow(QMainWindow):
         new_item.grid_snap    = item.grid_snap
         new_item.hover_preview = item.hover_preview
         new_item.setRotation(item.rotation())
-        new_item.setPos(item.pos() + QPointF(g, g))
+        new_item.setPos(QPointF(x, y))
         self._connect_image_item(new_item)
         self._scene.addItem(new_item)
         self._image_items.append(new_item)
+
+        self._image_cascade_row += 1
+        if top_left.y() + self._image_cascade_row * step + step > top_left.y() + vp_height:
+            self._image_cascade_row = 0
+            self._image_cascade_col += 1
 
     def _on_deck_duplicate(self, di: DeckItem) -> None:
         import uuid as _uuid
@@ -851,12 +982,7 @@ class MainWindow(QMainWindow):
                 self._settings.notepad_config_path(),
                 self,
             )
-            # Apply current theme immediately
-            canvas_hex = self._settings.canvas("background_color")
-            if self._settings.display("use_canvas_theme"):
-                self._notepad_dlg.apply_theme(canvas_hex)
-            else:
-                self._notepad_dlg.apply_theme(None)
+            self._notepad_dlg.apply_theme(None)
         if self._notepad_dlg.isVisible():
             self._notepad_dlg.raise_()
             self._notepad_dlg.activateWindow()
@@ -941,6 +1067,10 @@ class MainWindow(QMainWindow):
     def _on_library_image_deleted(self, path: str) -> None:
         """Remove all canvas ImageItems that referenced the deleted file."""
         for item in [i for i in self._image_items if i._image_path == path]:
+            self._on_image_delete(item)
+
+    def _on_image_remove_from_scene(self, items: list) -> None:
+        for item in items:
             self._on_image_delete(item)
 
     def _on_image_resize(self, item: ImageItem) -> None:
@@ -1183,6 +1313,8 @@ class MainWindow(QMainWindow):
         item.card_hovered.connect(self._on_card_hovered)
         item.card_unhovered.connect(self._on_card_unhovered)
         item.stack_requested.connect(self._on_stack_requested)
+        item.copy_requested.connect(self._copy_selected)
+        item.delete_requested.connect(self._on_card_delete)
         self._scene.addItem(item)
         self._canvas_cards[card_data.image_path] = item
         return item
@@ -1193,7 +1325,8 @@ class MainWindow(QMainWindow):
 
     def _on_draw_to_hand(self, cards: list) -> None:
         for card_data in cards:
-            self._hand.add_card(card_data, face_up=True)
+            rotation = 180.0 if getattr(card_data, "reversed", False) else 0.0
+            self._hand.add_card(card_data, face_up=True, rotation=rotation)
         self._status.showMessage(f"Drew {len(cards)} card(s) to hand.", 2000)
 
     def _on_draw_to_canvas(self, cards: list, near_pos: QPointF, deck_card_h: int = CARD_H) -> None:
@@ -1201,6 +1334,8 @@ class MainWindow(QMainWindow):
         y_offset = deck_card_h + 16
         for i, card_data in enumerate(cards):
             item = self._create_card_item(card_data, face_up=True)
+            if getattr(card_data, "reversed", False):
+                item.setRotation(180.0)
             offset = QPointF(i * spread, y_offset)
             item.setPos(near_pos + offset)
 
@@ -1216,13 +1351,17 @@ class MainWindow(QMainWindow):
             if isinstance(item, CardItem):
                 card_data = item.card_data
                 face_up   = item.face_up
+                rotation  = item.rotation() if item.rotation() != 0 else (
+                    180.0 if getattr(card_data, "reversed", False) else 0.0
+                )
                 self._canvas_cards.pop(card_data.image_path, None)
                 self._scene.removeItem(item)
-                self._hand.add_card(card_data, face_up=face_up)
+                self._hand.add_card(card_data, face_up=face_up, rotation=rotation)
             elif isinstance(item, DeckItem):
                 # Move all remaining cards in the deck/stack to hand
                 for card_data in list(item.deck_model.cards):
-                    self._hand.add_card(card_data, face_up=item.face_up)
+                    rot = 180.0 if getattr(card_data, "reversed", False) else 0.0
+                    self._hand.add_card(card_data, face_up=item.face_up, rotation=rot)
                 deck_id = item.deck_model.id
                 self._scene.removeItem(item)
                 self._deck_items.pop(deck_id, None)
@@ -1274,7 +1413,11 @@ class MainWindow(QMainWindow):
         if should_show:
             path = card_data.image_path
             if path and Path(path).exists():
-                self._magnify.set_card(QPixmap(path))
+                pix = QPixmap(path)
+                if getattr(card_data, "reversed", False):
+                    from PyQt6.QtGui import QTransform
+                    pix = pix.transformed(QTransform().rotate(180))
+                self._magnify.set_card(pix)
                 vp = self._view.viewport()
                 self._magnify.reposition(
                     vp.size(),
@@ -1456,29 +1599,50 @@ class MainWindow(QMainWindow):
         if result != QDialog.DialogCode.Accepted:
             return
         opts = dlg.result_options()
+        deck_ids = set(opts["deck_ids"])
+        if not deck_ids:
+            return
 
-        if opts["from_canvas"]:
-            for item in list(self._scene.items()):
-                if isinstance(item, CardItem):
-                    if getattr(item, "locked", False):
-                        continue
-                    card_data = item.card_data
+        # Remove canvas cards belonging to recalled decks
+        for item in list(self._scene.items()):
+            if isinstance(item, CardItem):
+                if item.card_data.deck_id in deck_ids:
+                    self._canvas_cards.pop(item.card_data.image_path, None)
                     self._scene.removeItem(item)
-                    self._canvas_cards.pop(card_data.image_path, None)
-                    dm = self._deck_models.get(card_data.deck_id)
-                    if dm:
-                        dm.add_to_bottom(card_data)
 
-        if opts["from_hand"]:
+        # Handle hand cards
+        if opts["include_hand"]:
             for hs in list(self._hand.hand_cards):
-                dm = self._deck_models.get(hs.card_data.deck_id)
-                if dm:
-                    dm.add_to_bottom(hs.card_data)
-            self._hand.clear()
+                if hs.card_data.deck_id in deck_ids:
+                    self._hand.remove_card_by_id(hs.card_data.id)
+
+        # Collect hand card IDs per deck (for exclusion if include_hand is False)
+        hand_card_ids: dict = {}  # deck_id → set of card ids in hand
+        if not opts["include_hand"]:
+            for hs in self._hand.hand_cards:
+                if hs.card_data.deck_id in deck_ids:
+                    hand_card_ids.setdefault(hs.card_data.deck_id, set()).add(hs.card_data.id)
+
+        # Restore each recalled deck
+        for deck_id in deck_ids:
+            dm = self._deck_models.get(deck_id)
+            if dm:
+                excluded = set()
+                if not opts["restore_deleted"]:
+                    excluded |= dm.deleted_card_ids
+                if not opts["include_hand"]:
+                    excluded |= hand_card_ids.get(deck_id, set())
+                dm.cards = [c for c in dm.all_cards if c.id not in excluded]
+                for card in dm.cards:
+                    card.reversed = False
+                if opts["restore_deleted"]:
+                    dm.deleted_card_ids.clear()
 
         if opts["shuffle_after"]:
-            for dm in self._deck_models.values():
-                dm.shuffle()
+            for deck_id in deck_ids:
+                dm = self._deck_models.get(deck_id)
+                if dm:
+                    dm.shuffle()
 
         for di in self._deck_items.values():
             di.update()
@@ -1513,8 +1677,13 @@ class MainWindow(QMainWindow):
         self._die_items.clear()
         self._image_items.clear()
         self._roll_log.clear()
+        self._frozen_measurements.clear()
+        self._cancel_active_measurement()
+        self._drawing_items.clear()
         self._dice_cascade_col = 0
         self._dice_cascade_row = 0
+        self._image_cascade_col = 0
+        self._image_cascade_row = 0
         self._hand.clear()
         self._active_deck_id = None
         self._session_path = None
@@ -1541,6 +1710,8 @@ class MainWindow(QMainWindow):
             die_items=self._die_items,
             roll_log=self._roll_log,
             image_items=self._image_items,
+            measurement_items=self._frozen_measurements,
+            drawing_items=self._drawing_items,
         )
         saved = self._session.save(state, path=path, name=name or path.stem)
         self._session_path = saved
@@ -1606,9 +1777,10 @@ class MainWindow(QMainWindow):
             di = DeckItem(dm)
             di.setPos(deck_dict.get("canvas_x", 0), deck_dict.get("canvas_y", 0))
             di.setRotation(deck_dict.get("rotation", 0))
-            di.face_up   = deck_dict.get("face_up", False)
-            di.is_stack  = deck_dict.get("is_stack", False)
-            di.grid_snap = self._settings.canvas("grid_snap")
+            di.face_up          = deck_dict.get("face_up", False)
+            di.is_stack         = deck_dict.get("is_stack", False)
+            di.reversal_enabled = deck_dict.get("reversal_enabled", False)
+            di.grid_snap        = self._settings.canvas("grid_snap")
             di.grid_size = self._settings.canvas("grid_size")
             self._connect_deck_item(di)
             self._scene.addItem(di)
@@ -1718,21 +1890,54 @@ class MainWindow(QMainWindow):
             if hasattr(item, "hover_preview"):
                 item.hover_preview = hp
 
+        # Restore frozen measurement items
+        for mi in list(self._frozen_measurements):
+            if mi.scene():
+                self._scene.removeItem(mi)
+        self._frozen_measurements.clear()
+        for md in data.get("measurements", []):
+            try:
+                item = MeasurementItem.from_dict(md)
+                self._scene.addItem(item)
+                item.delete_requested.connect(lambda i=item: self._remove_measurement(i))
+                self._frozen_measurements.append(item)
+            except Exception:
+                pass
+
+        # Restore drawing items
+        self._drawing_items.clear()
+        for dd in data.get("drawings", []):
+            try:
+                from .drawing_item import DrawingStrokeItem, DrawingShapeItem
+                dtype = dd.get("type")
+                if dtype == "stroke":
+                    item = DrawingStrokeItem.from_dict(dd)
+                    self._scene.addItem(item)
+                    self._drawing_items.append(item)
+                elif dtype == "shape":
+                    item = DrawingShapeItem.from_dict(dd)
+                    item.delete_requested.connect(lambda i=item: self._remove_drawing_item(i))
+                    self._scene.addItem(item)
+                    self._drawing_items.append(item)
+            except Exception:
+                pass
+
     # ------------------------------------------------------------------
     # Undo / redo
     # ------------------------------------------------------------------
 
     def _push_undo(self) -> None:
-        """Snapshot current state onto the undo stack (max 10)."""
+        """Snapshot current state onto the undo stack (configurable max levels)."""
         from .session_manager import SessionManager as _SM
         state = _SM.build_state(
             self._view, self._scene, self._hand,
             self._deck_models, self._deck_items,
             die_items=self._die_items,
             image_items=self._image_items,
+            drawing_items=self._drawing_items,
         )
         self._undo_stack.append(state)
-        if len(self._undo_stack) > 10:
+        if len(self._undo_stack) > self._settings.system("undo_stack_size"):
             self._undo_stack.pop(0)
         self._redo_stack.clear()
         self._undo_action.setEnabled(True)
@@ -1748,6 +1953,7 @@ class MainWindow(QMainWindow):
             self._deck_models, self._deck_items,
             die_items=self._die_items,
             image_items=self._image_items,
+            drawing_items=self._drawing_items,
         )
         self._redo_stack.append(current)
         state = self._undo_stack.pop()
@@ -1764,6 +1970,7 @@ class MainWindow(QMainWindow):
             self._deck_models, self._deck_items,
             die_items=self._die_items,
             image_items=self._image_items,
+            drawing_items=self._drawing_items,
         )
         self._undo_stack.append(current)
         state = self._redo_stack.pop()
@@ -1779,11 +1986,32 @@ class MainWindow(QMainWindow):
         for item in self._scene.items():
             item.setSelected(True)
 
+    def _on_sys_clipboard_changed(self) -> None:
+        import time as _time
+        self._sys_clipboard_time = _time.monotonic()
+
+    def _on_card_delete(self, item: CardItem) -> None:
+        self._push_undo()
+        dm = self._deck_models.get(item.card_data.deck_id)
+        if dm:
+            dm.deleted_card_ids.add(item.card_data.id)
+        self._canvas_cards.pop(item.card_data.image_path, None)
+        self._scene.removeItem(item)
+
+    def _on_deck_delete(self, di: DeckItem) -> None:
+        self._push_undo()
+        deck_id = di.deck_model.id
+        self._scene.removeItem(di)
+        self._deck_items.pop(deck_id, None)
+        self._deck_models.pop(deck_id, None)
+
     def _copy_selected(self) -> None:
         """Serialize selected copyable items into the internal clipboard."""
         entries = []
         for item in self._scene.selectedItems():
-            if isinstance(item, ImageItem):
+            if isinstance(item, CardItem):
+                entries.append({"type": "card", "state": item.to_state_dict()})
+            elif isinstance(item, ImageItem):
                 entries.append({"type": "image", "state": item.to_state_dict()})
             elif isinstance(item, DieItem):
                 entries.append({"type": "die", "state": item.to_state_dict()})
@@ -1797,13 +2025,19 @@ class MainWindow(QMainWindow):
                 deck_state["grid_snap"] = item.grid_snap
                 entries.append({"type": "deck", "state": deck_state})
         if entries:
+            import time as _time
             self._clipboard = entries
+            self._clipboard_time = _time.monotonic()
 
     def _paste_clipboard(self) -> None:
-        """Recreate clipboard items centered at the cursor's scene position.
-        Falls back to pasting an image from the system clipboard if the internal
-        clipboard is empty."""
-        if not self._clipboard:
+        """Paste whichever clipboard was modified most recently —
+        the internal canvas clipboard or the system image clipboard."""
+        sys_has_image = not QApplication.clipboard().image().isNull()
+        use_internal = (
+            bool(self._clipboard)
+            and (not sys_has_image or self._clipboard_time >= self._sys_clipboard_time)
+        )
+        if not use_internal:
             self._paste_system_image()
             return
         import uuid as _uuid
@@ -1828,7 +2062,29 @@ class MainWindow(QMainWindow):
         for entry in self._clipboard:
             t = entry["type"]
             s = entry["state"]
-            if t == "image":
+            if t == "card":
+                dm = self._deck_models.get(s.get("deck_id"))
+                if dm:
+                    cd = dm.card_by_image_path(s["image_path"])
+                    if cd is None:
+                        continue
+                    item = CardItem(cd, face_up=s.get("face_up", True))
+                    item.grid_snap = s.get("grid_snap", False)
+                    item.grid_size = self._settings.canvas("grid_size")
+                    item.setRotation(s.get("rotation", 0))
+                    item._base_z = s.get("z", 1.0)
+                    item.send_to_hand.connect(self._on_card_send_to_hand)
+                    item.return_to_deck.connect(self._on_card_return_to_deck)
+                    item.card_hovered.connect(self._on_card_hovered)
+                    item.card_unhovered.connect(self._on_card_unhovered)
+                    item.stack_requested.connect(self._on_stack_requested)
+                    item.copy_requested.connect(self._copy_selected)
+                    item.delete_requested.connect(self._on_card_delete)
+                    item.setPos(QPointF(s["x"], s["y"]) + offset)
+                    self._scene.addItem(item)
+                    self._canvas_cards[cd.image_path] = item
+                    item.setSelected(True)
+            elif t == "image":
                 item = ImageItem(
                     s["path"],
                     w_cells=s.get("w_cells", 1.0),
@@ -1860,9 +2116,10 @@ class MainWindow(QMainWindow):
                 new_state["id"] = str(_uuid.uuid4())
                 new_dm = DeckModel.from_dict(new_state)
                 new_di = DeckItem(new_dm)
-                new_di.face_up   = s.get("face_up", False)
-                new_di.is_stack  = s.get("is_stack", False)
-                new_di.grid_snap = s.get("grid_snap", False)
+                new_di.face_up          = s.get("face_up", False)
+                new_di.is_stack         = s.get("is_stack", False)
+                new_di.reversal_enabled = s.get("reversal_enabled", False)
+                new_di.grid_snap        = s.get("grid_snap", False)
                 new_di.grid_size = self._settings.canvas("grid_size")
                 new_di.setPos(
                     QPointF(s.get("canvas_x", 0), s.get("canvas_y", 0)) + offset
@@ -1917,6 +2174,9 @@ class MainWindow(QMainWindow):
             self._push_undo()
         for item in list(self._scene.selectedItems()):
             if isinstance(item, CardItem):
+                dm = self._deck_models.get(item.card_data.deck_id)
+                if dm:
+                    dm.deleted_card_ids.add(item.card_data.id)
                 self._canvas_cards.pop(item.card_data.image_path, None)
                 self._scene.removeItem(item)
             elif isinstance(item, DeckItem):
@@ -1931,6 +2191,10 @@ class MainWindow(QMainWindow):
             elif isinstance(item, ImageItem):
                 if item in self._image_items:
                     self._image_items.remove(item)
+                self._scene.removeItem(item)
+            elif isinstance(item, MeasurementItem):
+                if item in self._frozen_measurements:
+                    self._frozen_measurements.remove(item)
                 self._scene.removeItem(item)
 
     # ------------------------------------------------------------------
@@ -1950,10 +2214,6 @@ class MainWindow(QMainWindow):
 
     def _open_bg_dialog(self) -> None:
         dlg = BackgroundDialog(self._scene, self)
-        def _on_bg_done(_):
-            self._hand.update()
-            self._apply_theme()
-        dlg.finished.connect(_on_bg_done)
         self._show_nonmodal(dlg)
 
     # ------------------------------------------------------------------
@@ -1968,7 +2228,9 @@ class MainWindow(QMainWindow):
     def _on_settings_closed(self, result: int) -> None:
         if result == QDialog.DialogCode.Accepted:
             self._hand.set_max_card_width(self._settings.display("max_hand_card_width"))
-            self._hand.update()  # also picks up any canvas color change
+            self._reposition_hand()
+            self._update_hand_zone()
+            self._hand.update()
             self._scene.grid_visible = self._settings.canvas("grid_enabled")
             self._scene.grid_size    = self._settings.canvas("grid_size")
             self._scene.grid_color   = self._settings.canvas("grid_color")
@@ -1984,31 +2246,10 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _apply_theme(self) -> None:
-        """Apply (or remove) the canvas-derived colour theme application-wide."""
-        canvas_hex = self._settings.canvas("background_color")
-        if self._settings.display("use_canvas_theme"):
-            panel = _theme.panel_color(canvas_hex)
-            ss = _theme.build_app_stylesheet(panel)
-            QApplication.instance().setStyleSheet(ss)
-        else:
-            QApplication.instance().setStyleSheet(_WINDOW_STYLE)
-
-        # Keep the zoom / hint labels readable against the status bar background
-        from PyQt6.QtGui import QColor as _QColor
-        if self._settings.display("use_canvas_theme"):
-            _bg = _theme.panel_color(canvas_hex)
-        else:
-            _bg = _QColor(30, 30, 46)   # default dark window background
-        _txt = _theme.text_color(_bg).name()
-        self._zoom_label.setStyleSheet(f"color: {_txt}; margin-right: 8px;")
-        self._hotkey_hint_label.setStyleSheet(f"color: {_txt}; margin-left: 6px;")
-
-        # Propagate to notepad if open
-        if self._notepad_dlg is not None:
-            if self._settings.display("use_canvas_theme"):
-                self._notepad_dlg.apply_theme(canvas_hex)
-            else:
-                self._notepad_dlg.apply_theme(None)
+        """Apply the static UI palette application-wide."""
+        QApplication.instance().setStyleSheet(_theme.APP_STYLESHEET)
+        self._zoom_label.setStyleSheet("color: #8C8D9B; margin-right: 8px;")
+        self._hotkey_hint_label.setStyleSheet("color: #8C8D9B; margin-left: 6px;")
 
     # ------------------------------------------------------------------
     # Status bar
@@ -2050,12 +2291,415 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        if hasattr(self, "_toolbar"):
+            self._toolbar._reposition()
+        self._reposition_hand()
+        self._update_hand_zone()
         if hasattr(self, "_magnify") and self._magnify.isVisible():
             vp = self._view.viewport()
             self._magnify.reposition(
                 vp.size(),
                 self._settings.display("magnify_corner"),
             )
+        if hasattr(self, "_dim_bubble"):
+            self._reposition_dim_bubble()
+
+    # ------------------------------------------------------------------
+    # Measurement tool
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Hand widget helpers
+    # ------------------------------------------------------------------
+
+    def _toggle_hand_widget(self) -> None:
+        self._hand.toggle_visible()
+
+    def _reposition_hand(self) -> None:
+        if not hasattr(self, "_hand"):
+            return
+        central = self.centralWidget()
+        if central is None:
+            return
+        self._hand.reposition(central.width(), central.height())
+
+    def _update_hand_zone(self) -> None:
+        """Tell the canvas view where the hand zone is for drag detection."""
+        if hasattr(self, "_hand") and hasattr(self, "_view"):
+            self._view.set_hand_zone(self._hand.height() + _HAND_MARGIN_BOTTOM + 20)
+
+    def _on_measurement_toggled(self, active: bool) -> None:
+        """M key pressed: sync toolbar and cursor."""
+        if active:
+            self._finalize_active_draw()
+            self._view.drawing_active = False
+            self._close_draw_settings()
+            self._toolbar.set_active_tool("measure")
+            self._view.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self._toolbar.set_active_tool("pointer")
+            self._view.unsetCursor()
+            self._cancel_active_measurement()
+
+    def _on_toolbar_tool_changed(self, tool: str) -> None:
+        """Toolbar Pointer/Measure/Draw button clicked — sync view state."""
+        self._view.measurement_active = (tool == "measure")
+        self._view.drawing_active = (tool == "draw")
+        if tool == "measure":
+            self._view.setCursor(Qt.CursorShape.CrossCursor)
+            self._cancel_active_measurement()
+            self._finalize_active_draw()
+            self._close_draw_settings()
+        elif tool == "draw":
+            self._view.setCursor(Qt.CursorShape.CrossCursor)
+            self._cancel_active_measurement()
+            self._open_draw_settings()
+        else:
+            self._view.unsetCursor()
+            self._cancel_active_measurement()
+            self._finalize_active_draw()
+            self._close_draw_settings()
+
+    def _on_measure_mode_changed(self, mode: str) -> None:
+        self._settings.set_measurement("mode", mode)
+        self._settings.save()
+
+    def _on_measure_type_changed(self, mtype: str) -> None:
+        self._settings.set_measurement("measure_type", mtype)
+        self._settings.save()
+        self._update_measure_menu_state()
+
+    def _on_canvas_interaction(self) -> None:
+        """Clear non-persistent frozen measurements when the canvas is clicked in pointer mode."""
+        if not self._view.measurement_active and not self._measure_persistent:
+            self._clear_all_measurements()
+
+    def _on_measure_persistent_toggled(self, checked: bool) -> None:
+        self._measure_persistent = checked
+
+    def _clear_all_measurements(self) -> None:
+        for item in list(self._frozen_measurements):
+            if item.scene():
+                self._scene.removeItem(item)
+        self._frozen_measurements.clear()
+
+    def _on_measurement_press(self, scene_pos) -> None:
+        """Start a new measurement item; clear any previous frozen measurement."""
+        self._cancel_active_measurement()
+        if not self._measure_persistent:
+            self._clear_all_measurements()
+        m = self._settings
+        item = MeasurementItem(
+            origin       = scene_pos,
+            measure_type = m.measurement("measure_type"),
+            mode         = m.measurement("mode"),
+            grid_size    = self._scene.grid_size,
+            cell_value   = m.measurement("cell_value"),
+            cell_unit    = m.measurement("cell_unit"),
+            cone_angle   = m.measurement("cone_angle"),
+        )
+        self._scene.addItem(item)
+        self._active_measurement = item
+        self._dim_bubble.show()
+        self._reposition_dim_bubble()
+
+    def _on_measurement_move(self, scene_pos) -> None:
+        """Update the active measurement and dimension bubble."""
+        if self._active_measurement is not None:
+            self._active_measurement.update_end(scene_pos)
+            self._dim_bubble.set_text(self._active_measurement.dimension_text())
+
+    def _on_measurement_waypoint(self) -> None:
+        """Space pressed during line measurement — pin current endpoint as a waypoint."""
+        if self._active_measurement is not None:
+            self._active_measurement.add_waypoint()
+
+    def _on_measurement_release(self, scene_pos) -> None:
+        """Freeze the active measurement onto the canvas."""
+        if self._active_measurement is None:
+            return
+        item = self._active_measurement
+        self._active_measurement = None
+        item.update_end(scene_pos)
+        item.freeze()
+        item.delete_requested.connect(lambda i=item: self._remove_measurement(i))
+        self._frozen_measurements.append(item)
+        self._dim_bubble.hide()
+
+    def _cancel_active_measurement(self) -> None:
+        if self._active_measurement is not None:
+            if self._active_measurement.scene():
+                self._scene.removeItem(self._active_measurement)
+            self._active_measurement = None
+        if hasattr(self, "_dim_bubble"):
+            self._dim_bubble.hide()
+
+    def _remove_measurement(self, item: MeasurementItem) -> None:
+        if item in self._frozen_measurements:
+            self._frozen_measurements.remove(item)
+        if item.scene():
+            self._scene.removeItem(item)
+
+    def _reposition_dim_bubble(self) -> None:
+        if not hasattr(self, "_dim_bubble"):
+            return
+        central = self.centralWidget()
+        if central is None:
+            return
+        bw = self._dim_bubble.width()
+        bh = self._dim_bubble.height()
+        # Lower-left of the canvas view area (avoids magnify overlay at bottom-right)
+        view_rect = self._view.geometry()
+        margin = 12
+        self._dim_bubble.move(
+            view_rect.left() + margin,
+            view_rect.bottom() - bh - margin,
+        )
+
+    # Measure menu helpers
+    def _update_measure_menu_state(self) -> None:
+        if not hasattr(self, "_measure_actions"):
+            return
+        current = self._settings.measurement("measure_type")
+        for mtype, action in self._measure_actions.items():
+            action.setChecked(mtype == current)
+        if hasattr(self, "_measure_grid_action"):
+            self._measure_grid_action.setChecked(
+                self._settings.measurement("mode") == "grid"
+            )
+
+    # ------------------------------------------------------------------
+    # Drawing tool handlers
+    # ------------------------------------------------------------------
+
+    def _open_draw_settings(self) -> None:
+        if self._draw_settings_dlg is None:
+            self._draw_settings_dlg = DrawingSettingsDialog(self._settings, self)
+            self._draw_settings_dlg.settings_changed.connect(self._on_draw_settings_changed)
+        self._draw_settings_dlg.show()
+        self._draw_settings_dlg.raise_()
+
+    def _close_draw_settings(self) -> None:
+        if self._draw_settings_dlg is not None:
+            self._draw_settings_dlg.hide()
+
+    def _on_draw_settings_changed(self) -> None:
+        pass  # Live settings; no canvas update needed until next stroke/shape
+
+    def _on_draw_tool_changed(self, sub_tool: str) -> None:
+        """Draw sub-tool button changed (freehand/circle/square/eraser)."""
+        self._finalize_active_draw()
+        self._settings.set_drawing("sub_tool", sub_tool)
+        self._settings.save()
+
+    def _on_draw_press(self, scene_pos) -> None:
+        sub = self._settings.drawing("sub_tool")
+        self._eraser_did_erase = False
+        if sub == "eraser":
+            self._erase_at(scene_pos, push_undo=False)
+            return
+        snap = self._settings.drawing("snap_to_grid") and self._settings.canvas("grid_enabled")
+        if snap:
+            scene_pos = self._snap_to_grid(scene_pos)
+        if sub == "freehand":
+            self._active_draw_points = [scene_pos]
+            # Create a temporary stroke item to show live feedback
+            from .drawing_item import DrawingStrokeItem, make_smooth_path
+            from PyQt6.QtCore import QPointF
+            path = make_smooth_path([scene_pos])
+            stroke = DrawingStrokeItem(
+                path,
+                self._settings.drawing("stroke_color"),
+                self._settings.drawing("stroke_width"),
+            )
+            self._scene.addItem(stroke)
+            self._active_draw_stroke = stroke
+        elif sub in ("circle", "square"):
+            self._draw_start_pos = scene_pos
+            from .drawing_item import DrawingShapeItem
+            from PyQt6.QtCore import QRectF
+            item = DrawingShapeItem(
+                shape        = sub,
+                rect         = QRectF(scene_pos, scene_pos),
+                stroke_color = self._settings.drawing("stroke_color"),
+                stroke_width = self._settings.drawing("stroke_width"),
+                fill_color   = self._settings.drawing("fill_color"),
+                fill_opacity = self._settings.drawing("fill_opacity"),
+            )
+            self._scene.addItem(item)
+            self._active_draw_shape = item
+
+    def _on_draw_move(self, scene_pos) -> None:
+        sub = self._settings.drawing("sub_tool")
+        if sub == "eraser":
+            self._erase_at(scene_pos, push_undo=False)
+            return
+        snap = self._settings.drawing("snap_to_grid") and self._settings.canvas("grid_enabled")
+        if snap:
+            scene_pos = self._snap_to_grid(scene_pos)
+        if sub == "freehand" and self._active_draw_stroke is not None:
+            self._active_draw_points.append(scene_pos)
+            from .drawing_item import make_smooth_path
+            path = make_smooth_path(self._active_draw_points)
+            self._active_draw_stroke._path = path
+            self._active_draw_stroke.prepareGeometryChange()
+            self._active_draw_stroke.update()
+        elif sub in ("circle", "square") and self._active_draw_shape is not None:
+            from PyQt6.QtCore import QRectF
+            rect = QRectF(self._draw_start_pos, scene_pos).normalized()
+            self._active_draw_shape.update_rect(rect)
+
+    def _on_draw_release(self, scene_pos) -> None:
+        sub = self._settings.drawing("sub_tool")
+        if sub == "eraser":
+            if getattr(self, "_eraser_did_erase", False):
+                self._push_undo()
+            return
+        snap = self._settings.drawing("snap_to_grid") and self._settings.canvas("grid_enabled")
+        if snap:
+            scene_pos = self._snap_to_grid(scene_pos)
+        self._push_undo()
+        if sub == "freehand" and self._active_draw_stroke is not None:
+            self._active_draw_points.append(scene_pos)
+            from .drawing_item import make_smooth_path
+            path = make_smooth_path(self._active_draw_points)
+            self._active_draw_stroke._path = path
+            self._active_draw_stroke._points = list(self._active_draw_points)
+            self._active_draw_stroke.prepareGeometryChange()
+            self._active_draw_stroke.update()
+            self._drawing_items.append(self._active_draw_stroke)
+            self._active_draw_stroke = None
+            self._active_draw_points = []
+        elif sub in ("circle", "square") and self._active_draw_shape is not None:
+            from PyQt6.QtCore import QRectF
+            rect = QRectF(self._draw_start_pos, scene_pos).normalized()
+            # Discard zero-size shapes
+            if rect.width() < 2 and rect.height() < 2:
+                self._scene.removeItem(self._active_draw_shape)
+                self._undo_stack.pop() if self._undo_stack else None
+            else:
+                self._active_draw_shape.update_rect(rect)
+                self._active_draw_shape.delete_requested.connect(
+                    lambda i=self._active_draw_shape: self._remove_drawing_item(i)
+                )
+                self._drawing_items.append(self._active_draw_shape)
+            self._active_draw_shape = None
+            self._draw_start_pos = None
+
+    def _finalize_active_draw(self) -> None:
+        """Commit any in-progress drawing to the canvas (called on tool switch)."""
+        if self._active_draw_stroke is not None:
+            if len(self._active_draw_points) >= 2:
+                from .drawing_item import make_smooth_path
+                path = make_smooth_path(self._active_draw_points)
+                self._active_draw_stroke._path = path
+                self._active_draw_stroke._points = list(self._active_draw_points)
+                self._active_draw_stroke.prepareGeometryChange()
+                self._active_draw_stroke.update()
+                self._push_undo()
+                self._drawing_items.append(self._active_draw_stroke)
+            else:
+                if self._active_draw_stroke.scene():
+                    self._scene.removeItem(self._active_draw_stroke)
+            self._active_draw_stroke = None
+            self._active_draw_points = []
+        if self._active_draw_shape is not None:
+            rect = self._active_draw_shape._rect
+            if rect.width() >= 2 or rect.height() >= 2:
+                self._push_undo()
+                self._active_draw_shape.delete_requested.connect(
+                    lambda i=self._active_draw_shape: self._remove_drawing_item(i)
+                )
+                self._drawing_items.append(self._active_draw_shape)
+            else:
+                if self._active_draw_shape.scene():
+                    self._scene.removeItem(self._active_draw_shape)
+            self._active_draw_shape = None
+            self._draw_start_pos = None
+
+    def _on_draw_cancel(self) -> None:
+        """Discard any in-progress freehand stroke or shape without committing."""
+        if self._active_draw_stroke is not None:
+            if self._active_draw_stroke.scene():
+                self._scene.removeItem(self._active_draw_stroke)
+            self._active_draw_stroke = None
+            self._active_draw_points = []
+        if self._active_draw_shape is not None:
+            if self._active_draw_shape.scene():
+                self._scene.removeItem(self._active_draw_shape)
+            self._active_draw_shape = None
+            self._draw_start_pos = None
+
+    def _erase_at(self, scene_pos, push_undo: bool = True) -> None:
+        """Remove any drawing item that contains the given scene position."""
+        from .drawing_item import DrawingStrokeItem, DrawingShapeItem
+        from PyQt6.QtCore import QRectF
+        hit_rect = QRectF(scene_pos.x() - 8, scene_pos.y() - 8, 16, 16)
+        # Use bounding-rect mode so strokes (whose shape() is empty) are found
+        items_hit = self._scene.items(
+            hit_rect, Qt.ItemSelectionMode.IntersectsItemBoundingRect
+        )
+        removed = False
+        for item in items_hit:
+            if isinstance(item, (DrawingStrokeItem, DrawingShapeItem)):
+                if item in self._drawing_items:
+                    self._drawing_items.remove(item)
+                self._scene.removeItem(item)
+                removed = True
+        if removed:
+            self._eraser_did_erase = True
+            if push_undo:
+                self._push_undo()
+
+    def _snap_to_grid(self, scene_pos):
+        """Snap a scene QPointF to the nearest grid cell corner."""
+        from PyQt6.QtCore import QPointF
+        gs = self._settings.canvas("grid_size")
+        if gs <= 0:
+            return scene_pos
+        x = round(scene_pos.x() / gs) * gs
+        y = round(scene_pos.y() / gs) * gs
+        return QPointF(x, y)
+
+    def _remove_drawing_item(self, item) -> None:
+        self._push_undo()
+        if item in self._drawing_items:
+            self._drawing_items.remove(item)
+        if item.scene():
+            self._scene.removeItem(item)
+
+    def _clear_all_drawings(self) -> None:
+        """Delete all drawing objects from the canvas (with confirmation)."""
+        if not self._drawing_items:
+            return
+        resp = QMessageBox.question(
+            self, "Clear All Drawings",
+            "Delete all drawing objects? This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if resp != QMessageBox.StandardButton.Yes:
+            return
+        for item in list(self._drawing_items):
+            if item.scene():
+                self._scene.removeItem(item)
+        self._drawing_items.clear()
+
+    def _set_measure_type_from_menu(self, mtype: str) -> None:
+        self._settings.set_measurement("measure_type", mtype)
+        self._settings.save()
+        self._toolbar.set_measure_type(mtype)
+        self._update_measure_menu_state()
+
+    def _set_measure_mode_from_menu(self, mode: str) -> None:
+        self._settings.set_measurement("mode", mode)
+        self._settings.save()
+        self._toolbar.set_measure_mode(mode)
+        self._update_measure_menu_state()
+
+    def _open_measurement_settings(self) -> None:
+        dlg = MeasurementSettingsDialog(self._settings, self)
+        if dlg.exec():
+            self._update_measure_menu_state()
 
     # ------------------------------------------------------------------
     # About
@@ -2088,6 +2732,8 @@ class MainWindow(QMainWindow):
                     die_items=self._die_items,
                     roll_log=self._roll_log,
                     image_items=self._image_items,
+                    measurement_items=self._frozen_measurements,
+                    drawing_items=self._drawing_items,
                 )
                 if self._session_path is not None:
                     # Save to the active named session

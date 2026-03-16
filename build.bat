@@ -37,10 +37,12 @@ echo.
     --distpath dist ^
     --workpath build ^
     --specpath build ^
+    --icon "%ROOT%\resources\images\scrollcanvas.io.ico" ^
     --hidden-import "PyQt6.QtSvg" ^
     --hidden-import "PyQt6.QtSvgWidgets" ^
+    --hidden-import "PyQt6.QtPdf" ^
+    --hidden-import "PyQt6.QtPdfWidgets" ^
     --collect-all qtawesome ^
-    --add-data "%ROOT%\Dice;Dice" ^
     main.py
 
 if errorlevel 1 (
@@ -50,10 +52,23 @@ if errorlevel 1 (
     exit /b 1
 )
 
+:: Copy Dice and resources folders next to the exe
+echo Copying Dice assets...
+xcopy /e /i /y "%ROOT%\Dice" "dist\SoloCanvas\Dice" >nul
+
+echo Copying resources...
+xcopy /e /i /y "%ROOT%\resources" "dist\SoloCanvas\resources" >nul
+
 :: Create the Decks folder next to the exe (users populate this with their own decks)
 if not exist "dist\SoloCanvas\Decks" (
     mkdir "dist\SoloCanvas\Decks"
     echo Created dist\SoloCanvas\Decks\
+)
+
+:: Create the Images folder next to the exe (user image library)
+if not exist "dist\SoloCanvas\Images" (
+    mkdir "dist\SoloCanvas\Images"
+    echo Created dist\SoloCanvas\Images\
 )
 
 :: Create the Notes folder next to the exe (global Markdown notepad storage)
@@ -67,8 +82,10 @@ echo.
 echo ============================================================
 echo  Build complete!
 echo  Executable:  dist\SoloCanvas\SoloCanvas.exe
-echo  Dice assets: dist\SoloCanvas\Dice\   (bundled automatically)
-echo  Deck folder: dist\SoloCanvas\Decks\  (add your card decks here)
+echo  Dice assets: dist\SoloCanvas\Dice\      (copied next to exe)
+echo  Resources:   dist\SoloCanvas\resources\ (copied next to exe)
+echo  Deck folder: dist\SoloCanvas\Decks\     (add your card decks here)
+echo  Img folder:  dist\SoloCanvas\Images\    (add your images here)
 echo ============================================================
 echo.
 

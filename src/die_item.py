@@ -16,36 +16,28 @@
 """DieItem – a single die on the canvas with roll animation."""
 from __future__ import annotations
 
-import random
-from typing import TYPE_CHECKING, Optional
+import math
+from typing import Optional
 
 from PyQt6.QtCore import (
-    QAbstractAnimation, QEasingCurve, QPointF, QRectF,
-    Qt, QTimer, pyqtProperty, pyqtSignal,
+    QAbstractAnimation, QEasingCurve, QPointF, QPropertyAnimation,
+    QRectF, Qt, QTimer, pyqtProperty, pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QAction, QBrush, QColor, QFont, QPainter, QPen, QPixmap,
+    QColor, QPainter, QPen, QPixmap,
 )
 from PyQt6.QtWidgets import (
     QGraphicsDropShadowEffect, QGraphicsItem, QGraphicsObject, QMenu,
 )
 
-try:
-    from PyQt6.QtCore import QPropertyAnimation
-except ImportError:
-    from PyQt6.QtCore import QPropertyAnimation  # noqa
-
-from .dice_manager import DIE_MAX, DIE_TYPES, DiceSetsManager
-
-if TYPE_CHECKING:
-    pass
+from .dice_manager import DIE_MAX, DIE_TYPES, DiceSetsManager, face_values, roll_value
 
 
 class DieItem(QGraphicsObject):
     """A single die placed on the canvas.
 
-    Bounding rect: width = die_size, height = 2 * die_size
-    Top half shows the SVG icon; bottom half shows the current value label.
+    Displays the current face PNG, animates a roll with face cycling,
+    cross-fade between faces, raise/scale effect, and shadow growth.
     """
 
     # Signals
@@ -63,19 +55,22 @@ class DieItem(QGraphicsObject):
     ):
         super().__init__(parent)
 
-        self.die_type     = die_type
-        self.set_name     = set_name
-        self._manager     = dice_manager
-        self._settings    = settings
+        self.die_type  = die_type
+        self.set_name  = set_name
+        self._manager  = dice_manager
+        self._settings = settings
 
-        self._die_size: int  = settings.canvas("grid_size")
+        self._die_size: int    = settings.canvas("grid_size")
         self._spin_angle: float = 0.0
-        self.value: int      = DIE_MAX.get(die_type, 6)
+        self.value: int        = DIE_MAX.get(die_type, 6)
+        self._prev_value: int  = self.value
 
-        # Persistent Z order (same pattern as CardItem)
+        # Cross-fade state
+        self._face_fade_val: float = 1.0   # 1.0 = fully on current face
+
+        # Persistent Z order
         self._base_z: float = 1.0
 
-        # Flags
         self.setFlags(
             QGraphicsItem.GraphicsItemFlag.ItemIsSelectable |
             QGraphicsItem.GraphicsItemFlag.ItemIsMovable |
@@ -83,35 +78,69 @@ class DieItem(QGraphicsObject):
         )
         self.setAcceptHoverEvents(False)
         self.setZValue(1)
+        self._update_transform_origin()
 
-        # Roll animation
+        # Drop shadow — resting values match DeckItem for visual consistency
+        self._shadow = QGraphicsDropShadowEffect()
+        self._shadow.setBlurRadius(14)
+        self._shadow.setOffset(5, 8)
+        self._shadow.setColor(QColor(0, 0, 0, 170))
+        self.setGraphicsEffect(self._shadow)
+
+        # Roll lift factor: 0.0 = resting, 1.0 = peak of roll arc
+        # Drives shadow blur/offset and item scale simultaneously.
+        self._roll_lift_val: float = 0.0
+
+        # ── Spin animation ──────────────────────────────────────────────
         self._roll_anim = QPropertyAnimation(self, b"spin_angle")
         self._roll_anim.setDuration(1000)
         self._roll_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._roll_anim.finished.connect(self._on_roll_finished)
 
-        # Value randomisation timer during animation
+        # ── Face cycling timer (interval lengthens as roll progresses) ──
         self._roll_timer = QTimer()
-        self._roll_timer.setInterval(80)
-        self._roll_timer.timeout.connect(self._randomise_value)
+        self._roll_timer.setInterval(20)
+        self._roll_timer.timeout.connect(self._randomise_face)
+
+        # ── Cross-fade animation ─────────────────────────────────────────
+        self._fade_anim = QPropertyAnimation(self, b"face_fade")
+        self._fade_anim.setDuration(15)
+        self._fade_anim.setStartValue(0.0)
+        self._fade_anim.setEndValue(1.0)
+
+        # ── Face lock-in timer — fires 50ms before roll ends ─────────────
+        self._lock_timer = QTimer()
+        self._lock_timer.setSingleShot(True)
+        self._lock_timer.timeout.connect(self._lock_in_final_face)
+
+        # ── Settle animation (eases roll_lift → 0 after roll ends) ──────
+        self._settle_anim = QPropertyAnimation(self, b"roll_lift")
+        self._settle_anim.setDuration(300)
+        self._settle_anim.setEndValue(0.0)
+        self._settle_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        # ── D2 flip animation ─────────────────────────────────────────────
+        self._flip_angle_val:   float = 0.0
+        self._flip_start_face:  int   = 1
+        self._flip_total_angle: float = 720.0
+        self._flip_anim = QPropertyAnimation(self, b"flip_angle")
+        self._flip_anim.setDuration(1000)
+        self._flip_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._flip_anim.finished.connect(self._on_flip_finished)
 
         # Final value to snap to when animation ends
         self._final_value: int = self.value
-        # When False, suppress the rolled signal (used for grouped rolls logged externally)
+        # When False, suppress the rolled signal (used for grouped rolls)
         self._log_individual: bool = True
-        self.hover_preview: bool = False
-        self.grid_snap: bool = False
-        self.grid_size: int  = settings.canvas("grid_size")
+        # When True, loop the roll animation seamlessly (hold-R behaviour)
+        self.keep_rolling: bool = False
 
-        # Drop shadow
-        shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(12)
-        shadow.setOffset(4, 6)
-        shadow.setColor(QColor(0, 0, 0, 160))
-        self.setGraphicsEffect(shadow)
+        self.hover_preview: bool = False
+        self.grid_snap: bool     = False
+        self.grid_size: int      = settings.canvas("grid_size")
 
     # ------------------------------------------------------------------
-    # pyqtProperty for spin_angle animation
+    # pyqtProperties
     # ------------------------------------------------------------------
 
     def _get_spin(self) -> float:
@@ -123,13 +152,59 @@ class DieItem(QGraphicsObject):
 
     spin_angle = pyqtProperty(float, _get_spin, _set_spin)
 
+    def _get_face_fade(self) -> float:
+        return self._face_fade_val
+
+    def _set_face_fade(self, v: float) -> None:
+        self._face_fade_val = v
+        self.update()
+
+    face_fade = pyqtProperty(float, _get_face_fade, _set_face_fade)
+
+    def _get_roll_lift(self) -> float:
+        return self._roll_lift_val
+
+    def _set_roll_lift(self, v: float) -> None:
+        self._roll_lift_val = v
+        # Shadow grows from resting (blur=14, offset=5,8) toward peak (blur=34, offset=13,20.8)
+        blur     = 14 + v * 20
+        offset_x = 5  + v * 8
+        offset_y = 8  + v * 12.8
+        self._shadow.setBlurRadius(blur)
+        self._shadow.setOffset(offset_x, offset_y)
+        self.setScale(1.0 + v * 0.25)
+        self.update()
+
+    roll_lift = pyqtProperty(float, _get_roll_lift, _set_roll_lift)
+
+    def _get_flip_angle(self) -> float:
+        return self._flip_angle_val
+
+    def _set_flip_angle(self, v: float) -> None:
+        old_seg = int(self._flip_angle_val / 180)
+        self._flip_angle_val = v
+        new_seg = int(v / 180)
+        if new_seg > old_seg:
+            # Crossed a 180° boundary — toggle face (d2 has faces 1 and 2)
+            other = 3 - self._flip_start_face
+            self.value = self._flip_start_face if new_seg % 2 == 0 else other
+        # Drive roll lift from flip progress (peaks at mid-flip)
+        progress = min(1.0, v / max(1.0, self._flip_total_angle))
+        self.roll_lift = math.sin(progress * math.pi)
+
+    flip_angle = pyqtProperty(float, _get_flip_angle, _set_flip_angle)
+
     # ------------------------------------------------------------------
     # Geometry
     # ------------------------------------------------------------------
 
     def boundingRect(self) -> QRectF:
         s = self._die_size
-        return QRectF(0, 0, s, s + s // 2)
+        return QRectF(0, 0, s, s)
+
+    def _update_transform_origin(self) -> None:
+        s = self._die_size
+        self.setTransformOriginPoint(s / 2.0, s / 2.0)
 
     # ------------------------------------------------------------------
     # Painting
@@ -138,97 +213,197 @@ class DieItem(QGraphicsObject):
     def paint(self, painter: QPainter, option, widget) -> None:
         s = self._die_size
         icon_rect = QRectF(0, 0, s, s)
-        label_rect = QRectF(0, s + 2, s, s // 2 - 2)
-
-        # ---------- Icon (top half) ----------
-        pix: QPixmap = self._manager.get_pixmap(self.die_type, self.set_name, s)
 
         painter.save()
-        # Rotate the icon around its centre point
-        cx = s / 2.0
-        cy = s / 2.0
-        painter.translate(cx, cy)
-        painter.rotate(self._spin_angle)
-        painter.translate(-cx, -cy)
+        cx, cy = s / 2.0, s / 2.0
+        if self.die_type == "d2":
+            # Vertical flip: squish Y around the horizontal centre axis
+            scale_y = max(abs(math.cos(math.radians(self._flip_angle_val))), 0.001)
+            painter.translate(cx, cy)
+            painter.scale(1.0, scale_y)
+            painter.translate(-cx, -cy)
+        else:
+            painter.translate(cx, cy)
+            painter.rotate(self._spin_angle)
+            painter.translate(-cx, -cy)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        painter.drawPixmap(icon_rect.toRect(), pix)
+
+        curr_pix = self._manager.get_face_pixmap(
+            self.die_type, self.value, self.set_name, s
+        )
+
+        if self._face_fade_val < 1.0 and self._prev_value != self.value:
+            prev_pix = self._manager.get_face_pixmap(
+                self.die_type, self._prev_value, self.set_name, s
+            )
+            painter.setOpacity(1.0 - self._face_fade_val)
+            painter.drawPixmap(icon_rect.toRect(), prev_pix)
+            painter.setOpacity(self._face_fade_val)
+            painter.drawPixmap(icon_rect.toRect(), curr_pix)
+            painter.setOpacity(1.0)
+        else:
+            painter.drawPixmap(icon_rect.toRect(), curr_pix)
+
         painter.restore()
 
-        # ---------- Selection ring ----------
+        # Selection ring
         from PyQt6.QtWidgets import QStyle
-        selected = bool(option.state & QStyle.StateFlag.State_Selected)
-        if selected:
+        if bool(option.state & QStyle.StateFlag.State_Selected):
             painter.setPen(QPen(QColor(255, 215, 0), 2))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(icon_rect)
-
-        # ---------- Label (bottom half) ----------
-        font_size = max(8, s // 3)
-        font = QFont("Arial", font_size, QFont.Weight.Bold)
-        painter.setFont(font)
-
-        label = self._value_label()
-
-        # Black outline via offset draws
-        outline_offsets = [(-1, -1), (1, -1), (-1, 1), (1, 1)]
-        painter.setPen(QColor(0, 0, 0, 180))
-        for dx, dy in outline_offsets:
-            offset_rect = label_rect.translated(dx, dy)
-            painter.drawText(offset_rect, Qt.AlignmentFlag.AlignCenter, label)
-
-        # White text on top
-        painter.setPen(QColor(255, 255, 255, 220))
-        painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, label)
-
-    def _value_label(self) -> str:
-        if self.die_type == "dF":
-            if self.value > 0:
-                return f"+{self.value}"
-            return str(self.value)
-        return str(self.value)
 
     # ------------------------------------------------------------------
     # Roll logic
     # ------------------------------------------------------------------
 
     def roll(self) -> None:
+        if self.die_type == "d2":
+            if self._flip_anim.state() == QAbstractAnimation.State.Running:
+                return
+            self._settle_anim.stop()
+            self._final_value      = roll_value(self.die_type)
+            self._flip_start_face  = self.value
+            # 4 full flips (1440°); add a half-flip (180°) if needed to land on the correct face
+            total = 1440.0 if self._final_value == self.value else 1620.0
+            self._flip_total_angle = total
+            self._flip_angle_val   = 0.0
+            self._flip_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            self._flip_anim.setStartValue(0.0)
+            self._flip_anim.setEndValue(total)
+            self._flip_anim.start()
+            return
+
         if self._roll_anim.state() == QAbstractAnimation.State.Running:
             return
 
-        # Determine final value now
-        max_val = DIE_MAX.get(self.die_type, 6)
-        if self.die_type == "dF":
-            self._final_value = random.choice([-1, 0, 1])
-        else:
-            self._final_value = random.randint(1, max_val)
+        self._settle_anim.stop()
+        self._final_value = roll_value(self.die_type)
 
         self._spin_angle = 0.0
+        self._roll_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._roll_anim.setStartValue(0.0)
-        self._roll_anim.setEndValue(720.0)
+        self._roll_anim.setEndValue(1440.0)
+        self._roll_timer.setInterval(20)
         self._roll_timer.start()
         self._roll_anim.start()
+        self._lock_timer.start(self._roll_anim.duration() - 50)
 
-    def _randomise_value(self) -> None:
-        max_val = DIE_MAX.get(self.die_type, 6)
-        if self.die_type == "dF":
-            self.value = random.choice([-1, 0, 1])
-        else:
-            self.value = random.randint(1, max_val)
+    def _randomise_face(self) -> None:
+        faces = face_values(self.die_type)
+        new_val = self.value
+        # Avoid same face twice in a row when there are choices
+        if len(faces) > 1:
+            while new_val == self.value:
+                new_val = faces[__import__("random").randrange(len(faces))]
+        self._prev_value = self.value
+        self.value = new_val
+
+        # Cross-fade to new face
+        self._face_fade_val = 0.0
+        self._fade_anim.stop()
+        self._fade_anim.start()
+
+        # Decelerate cycling: interval grows from 20ms → 400ms over roll duration
+        elapsed  = self._roll_anim.currentTime()
+        duration = max(1, self._roll_anim.duration())
+        progress = min(1.0, elapsed / duration)
+        self._roll_timer.setInterval(int(20 + progress * 380))
+
+        # Raise effect peaks mid-roll — drives shadow + scale via roll_lift property
+        self._roll_lift_val = math.sin(progress * math.pi)
+        blur     = 14 + self._roll_lift_val * 20
+        offset_x = 5  + self._roll_lift_val * 8
+        offset_y = 8  + self._roll_lift_val * 12.8
+        self._shadow.setBlurRadius(blur)
+        self._shadow.setOffset(offset_x, offset_y)
+        self.setScale(1.0 + self._roll_lift_val * 0.25)
+
         self.update()
+
+    def _lock_in_final_face(self) -> None:
+        """Stop face cycling and show the final result, called 50ms before roll ends."""
+        self._roll_timer.stop()
+        if self.value != self._final_value:
+            self._prev_value = self.value
+            self.value = self._final_value
+            self._face_fade_val = 0.0
+            self._fade_anim.stop()
+            self._fade_anim.start()
 
     def _on_roll_finished(self) -> None:
         self._roll_timer.stop()
         self._spin_angle = 0.0
-        self.value = self._final_value
+
+        # Final face (may already be set by the 50ms-early lock-in)
+        if self.value != self._final_value:
+            self._prev_value = self.value
+            self.value = self._final_value
+            self._face_fade_val = 0.0
+            self._fade_anim.stop()
+            self._fade_anim.start()
+
+        if self.keep_rolling:
+            # Seamless loop at full speed: linear easing, no settle, no signal
+            self._final_value = roll_value(self.die_type)
+            self._spin_angle  = 0.0
+            self._roll_anim.setEasingCurve(QEasingCurve.Type.Linear)
+            self._roll_anim.setStartValue(0.0)
+            self._roll_anim.setEndValue(1440.0)
+            self._roll_timer.setInterval(20)
+            self._roll_timer.start()
+            self._roll_anim.start()
+            self._lock_timer.start(self._roll_anim.duration() - 50)
+            return
+
+        # Normal finish — settle raise effect back to resting
+        self._lock_timer.stop()
+        self._settle_anim.stop()
+        self._settle_anim.setStartValue(self._roll_lift_val)
+        self._settle_anim.start()
+        self.update()
+
+        if self._log_individual:
+            self.rolled.emit(self, self._final_value)
+        else:
+            self._log_individual = True
+
+    def _on_flip_finished(self) -> None:
+        if self.keep_rolling:
+            # Seamless loop: 4 half-flips (720°) at linear speed, no settle
+            self._flip_start_face  = self.value
+            self._flip_total_angle = 720.0
+            self._flip_angle_val   = 0.0
+            self._flip_anim.setEasingCurve(QEasingCurve.Type.Linear)
+            self._flip_anim.setStartValue(0.0)
+            self._flip_anim.setEndValue(720.0)
+            self._flip_anim.start()
+            return
+
+        # Normal finish
+        self._flip_angle_val = 0.0
+        self._flip_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        if self.value != self._final_value:
+            self._prev_value = self.value
+            self.value = self._final_value
+            self._face_fade_val = 0.0
+            self._fade_anim.stop()
+            self._fade_anim.start()
+        # Settle shadow/scale back to resting
+        self._settle_anim.stop()
+        self._settle_anim.setStartValue(self._roll_lift_val)
+        self._settle_anim.start()
         self.update()
         if self._log_individual:
             self.rolled.emit(self, self._final_value)
         else:
-            self._log_individual = True  # reset for next roll
+            self._log_individual = True
 
     def reset_value(self) -> None:
-        """Reset to the maximum (default) value."""
+        """Reset to the maximum (default) face value."""
+        self._prev_value = self.value
         self.value = DIE_MAX.get(self.die_type, 6)
+        self._face_fade_val = 1.0
         self.update()
 
     # ------------------------------------------------------------------
@@ -238,10 +413,11 @@ class DieItem(QGraphicsObject):
     def update_die_size(self, new_size: int) -> None:
         self.prepareGeometryChange()
         self._die_size = new_size
+        self._update_transform_origin()
         self.update()
 
     # ------------------------------------------------------------------
-    # Z-order (same pattern as CardItem)
+    # Z-order
     # ------------------------------------------------------------------
 
     def _raise_to_top(self) -> None:
@@ -264,18 +440,17 @@ class DieItem(QGraphicsObject):
     def itemChange(self, change, value):
         if (change == QGraphicsItem.GraphicsItemChange.ItemPositionChange
                 and self.grid_snap and self.scene()):
-            import math as _math
             g = self.grid_size
-            mode = getattr(self.scene(), 'snap_mode', 'centered')
+            mode = getattr(self.scene(), "snap_mode", "centered")
             br = self.boundingRect()
-            hw = br.width() / 2
+            hw = br.width()  / 2
             hh = br.height() / 2
             cx = value.x() + hw
             cy = value.y() + hh
-            if mode == 'centered':
-                snapped_cx = _math.floor(cx / g) * g + g / 2
-                snapped_cy = _math.floor(cy / g) * g + g / 2
-            else:  # 'lines'
+            if mode == "centered":
+                snapped_cx = math.floor(cx / g) * g + g / 2
+                snapped_cy = math.floor(cy / g) * g + g / 2
+            else:
                 snapped_cx = round(cx / g) * g
                 snapped_cy = round(cy / g) * g
             return QPointF(snapped_cx - hw, snapped_cy - hh)
@@ -308,9 +483,9 @@ class DieItem(QGraphicsObject):
         menu.addAction("Duplicate", lambda: self.duplicate_requested.emit(self))
         menu.addAction("Delete",    lambda: self.delete_requested.emit(self))
         menu.addSeparator()
-        snap_label = "✓ Snap to Grid" if self.grid_snap else "Snap to Grid"
-        menu.addAction(snap_label, self._toggle_snap)
-        preview_label = "Preview: On" if self.hover_preview else "Preview: Off"
+        snap_label    = "✓ Snap to Grid" if self.grid_snap    else "Snap to Grid"
+        preview_label = "Preview: On"    if self.hover_preview else "Preview: Off"
+        menu.addAction(snap_label,    self._toggle_snap)
         menu.addAction(preview_label, self._toggle_hover_preview)
 
         from PyQt6.QtGui import QCursor
@@ -321,7 +496,7 @@ class DieItem(QGraphicsObject):
         self.grid_snap = new_val
         if self.scene() and self.isSelected():
             for item in self.scene().selectedItems():
-                if item is not self and hasattr(item, 'grid_snap'):
+                if item is not self and hasattr(item, "grid_snap"):
                     item.grid_snap = new_val
 
     def _toggle_hover_preview(self) -> None:
@@ -329,11 +504,11 @@ class DieItem(QGraphicsObject):
         self.hover_preview = new_val
         if self.scene() and self.isSelected():
             for item in self.scene().selectedItems():
-                if item is not self and hasattr(item, 'hover_preview'):
+                if item is not self and hasattr(item, "hover_preview"):
                     item.hover_preview = new_val
 
     # ------------------------------------------------------------------
-    # Serialisation helper
+    # Serialisation
     # ------------------------------------------------------------------
 
     def to_state_dict(self) -> dict:

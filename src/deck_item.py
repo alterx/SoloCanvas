@@ -55,14 +55,17 @@ class DeckItem(QGraphicsObject):
     stack_requested        = pyqtSignal()        # request MainWindow to stack selected items
     before_draw            = pyqtSignal()        # fires before any card is removed from model
     duplicate_requested    = pyqtSignal(object)  # emits self
+    delete_requested       = pyqtSignal(object)  # emits self when "Delete" is chosen
+    open_recall_requested  = pyqtSignal()        # emits when "Recall" is chosen
 
     def __init__(self, deck_model, parent=None):
         super().__init__(parent)
-        self.deck_model     = deck_model
-        self.face_up        = False   # when True, top card shows its front face
-        self.locked         = False
-        self.is_stack       = False   # True when created from stacked canvas cards
-        self.hover_preview  = True
+        self.deck_model       = deck_model
+        self.face_up          = False   # when True, top card shows its front face
+        self.locked           = False
+        self.is_stack         = False   # True when created from stacked canvas cards
+        self.hover_preview    = True
+        self.reversal_enabled = False   # when True, shuffle randomly reverses 25% of cards
         self._base_z: float = 1.0
 
         # Shadow
@@ -202,11 +205,15 @@ class DeckItem(QGraphicsObject):
             # Show a sliver of the back on each layer for realism
             if self._back_pix and not self._back_pix.isNull() and i <= 3:
                 painter.setOpacity(0.4 + 0.2 * i)
-                sliver = QRectF(layer_rect.x(), layer_rect.y(),
-                                min(STACK_OFFSET * 2, 4), ch)
+                sliver_w = min(STACK_OFFSET * 2, 4)
+                sliver = QRectF(layer_rect.x(), layer_rect.y(), sliver_w, ch)
+                # Sample only the left edge of the source image (avoids squishing
+                # transparent PNG corners into the sliver, which creates artifacts)
+                from PyQt6.QtCore import QRect
+                src_w = max(1, round(self._back_pix.width() * sliver_w / cw))
                 painter.drawPixmap(sliver.toRect(),
                                    self._back_pix,
-                                   self._back_pix.rect())
+                                   QRect(0, 0, src_w, self._back_pix.height()))
                 painter.setOpacity(1.0)
 
         # Top card – pick pixmap based on face_up state
@@ -285,6 +292,13 @@ class DeckItem(QGraphicsObject):
             return
         self._is_shuffling = True
         self.deck_model.shuffle()
+        if self.reversal_enabled:
+            import random as _random
+            for card in self.deck_model.cards:
+                card.reversed = _random.random() < 0.25
+        else:
+            for card in self.deck_model.cards:
+                card.reversed = False
         self._animate_shuffle()
 
     def _animate_shuffle(self) -> None:
@@ -434,6 +448,9 @@ class DeckItem(QGraphicsObject):
         parent = views[0] if views else None
         menu = QMenu(parent)
 
+        menu.addAction("Delete", lambda: self.delete_requested.emit(self))
+        menu.addAction("Recall", self.open_recall_requested.emit)
+        menu.addSeparator()
         # Flip
         flip_label = "Flip (show front)" if not self.face_up else "Flip (show back)"
         menu.addAction(flip_label, self.flip)
@@ -458,6 +475,8 @@ class DeckItem(QGraphicsObject):
         menu.addSeparator()
         menu.addAction("Shuffle", self.shuffle)
         menu.addAction("Spread",  self._spread_horizontal_action)
+        reversal_label = "✓ Reversal" if self.reversal_enabled else "Reversal"
+        menu.addAction(reversal_label, self._toggle_reversal)
         menu.addSeparator()
         lock_label = "Unlock" if self.locked else "Lock"
         menu.addAction(lock_label, self._toggle_lock)
@@ -492,6 +511,9 @@ class DeckItem(QGraphicsObject):
             self.draw_to_canvas_signal.emit(cards)
         if self.is_stack and self.deck_model.count == 0:
             self.stack_emptied.emit(self)
+
+    def _toggle_reversal(self) -> None:
+        self.reversal_enabled = not self.reversal_enabled
 
     def _toggle_snap(self) -> None:
         new_val = not self.grid_snap
@@ -555,12 +577,13 @@ class DeckItem(QGraphicsObject):
 
     def to_state_dict(self) -> dict:
         return {
-            "deck_id":   self.deck_model.id,
-            "x":         self.pos().x(),
-            "y":         self.pos().y(),
-            "rotation":  self.rotation(),
-            "face_up":   self.face_up,
-            "locked":    self.locked,
-            "grid_snap": self.grid_snap,
-            "is_stack":  self.is_stack,
+            "deck_id":          self.deck_model.id,
+            "x":                self.pos().x(),
+            "y":                self.pos().y(),
+            "rotation":         self.rotation(),
+            "face_up":          self.face_up,
+            "locked":           self.locked,
+            "grid_snap":        self.grid_snap,
+            "is_stack":         self.is_stack,
+            "reversal_enabled": self.reversal_enabled,
         }

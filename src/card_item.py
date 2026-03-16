@@ -47,11 +47,13 @@ class CardItem(QGraphicsObject):
     """A playing card on the canvas with flip/rotate/lift animations."""
 
     # Signals for MainWindow coordination
-    send_to_hand   = pyqtSignal(object)   # CardData
-    return_to_deck = pyqtSignal(object)   # CardData
-    card_hovered   = pyqtSignal(object)   # CardData
-    card_unhovered = pyqtSignal()
-    stack_requested = pyqtSignal()        # emitted when "Stack Selected" is chosen
+    send_to_hand     = pyqtSignal(object)   # CardData
+    return_to_deck   = pyqtSignal(object)   # CardData
+    card_hovered     = pyqtSignal(object)   # CardData
+    card_unhovered   = pyqtSignal()
+    stack_requested  = pyqtSignal()        # emitted when "Stack Selected" is chosen
+    copy_requested   = pyqtSignal()        # emitted when "Copy" is chosen
+    delete_requested = pyqtSignal(object)  # emits self when "Delete" is chosen
 
     def __init__(self, card_data, face_up: bool = True, parent=None):
         super().__init__(parent)
@@ -159,8 +161,9 @@ class CardItem(QGraphicsObject):
     # ------------------------------------------------------------------
 
     def boundingRect(self) -> QRectF:
-        # Extra left margin reserves space for the lock icon (18px + 4px gap)
-        extra = 26
+        # Extra left margin reserves space for the lock icon — only when locked
+        # (avoids shadow artifacts on transparent back images when unlocked)
+        extra = 26 if self.locked else 0
         return QRectF(-self.card_w / 2 - extra, -self.card_h / 2, self.card_w + extra, self.card_h)
 
     # ------------------------------------------------------------------
@@ -342,6 +345,9 @@ class CardItem(QGraphicsObject):
         parent = views[0] if views else None
         menu = QMenu(parent)
 
+        menu.addAction("Copy",           self.copy_requested.emit)
+        menu.addAction("Delete",         lambda: self.delete_requested.emit(self))
+        menu.addSeparator()
         menu.addAction("Flip",           self.flip)
         menu.addAction("Rotate CW",      self.rotate_cw)
         menu.addAction("Rotate CCW",     self.rotate_ccw)
@@ -395,6 +401,7 @@ class CardItem(QGraphicsObject):
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, not val)
         if val:
             self.setSelected(False)
+        self.prepareGeometryChange()  # bounding rect changes with lock state
         self.update()
 
     def _toggle_hover_preview(self) -> None:

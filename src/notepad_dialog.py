@@ -670,23 +670,14 @@ class NotepadDialog(QDialog):
         self.mark_closed()
 
     def apply_theme(self, canvas_hex) -> None:
-        if canvas_hex is None:
-            self._editor.setStyleSheet("")
-            self._status.setStyleSheet("color: gray; font-size: 10px; padding: 2px 6px;")
-            return
-        from . import theme as _theme
-        from PyQt6.QtGui import QColor
-        bg, txt, brd, sel = _theme.build_canvas_item_stylesheet(canvas_hex)
-        canvas_ss = (
-            f"background-color: {bg}; color: {txt}; "
-            f"border: 1px solid {brd};"
+        # Editor uses static secondary surface; canvas_hex is ignored but kept
+        # for API compatibility in case callers pass it.
+        self._editor.setStyleSheet(
+            "QTextEdit { background-color: #292A35; color: #FFFFFF; "
+            "border: 1px solid #4B4D63; }"
         )
-        self._editor.setStyleSheet(f"QTextEdit {{ {canvas_ss} }}")
-        # Status bar: pick readable text colour against the panel background
-        panel = _theme.panel_color(canvas_hex)
-        status_txt = _theme.text_color(panel).name()
         self._status.setStyleSheet(
-            f"color: {status_txt}; font-size: 10px; padding: 2px 6px;"
+            "color: #8C8D9B; font-size: 10px; padding: 2px 6px;"
         )
 
 

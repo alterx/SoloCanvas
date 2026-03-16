@@ -20,7 +20,8 @@ import math
 from typing import Optional
 
 from PyQt6.QtCore import QEvent, QPointF, Qt, pyqtSignal
-from PyQt6.QtGui import QCursor, QKeyEvent, QMouseEvent, QWheelEvent
+from PyQt6.QtGui import QCursor, QKeyEvent, QMouseEvent, QSurfaceFormat, QWheelEvent
+from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 from PyQt6.QtWidgets import QGraphicsView
 
 ZOOM_MIN = 0.08
@@ -43,12 +44,26 @@ class CanvasView(QGraphicsView):
 
     zoom_changed             = pyqtSignal(float)    # current scale
     key_action               = pyqtSignal(str)      # action name to process
+    key_release_action       = pyqtSignal(str)      # key release action name
     rotate_held_item         = pyqtSignal(int)      # +1 = CW, -1 = CCW (wheel while holding)
     canvas_right_click       = pyqtSignal(QPointF)  # scene position
     canvas_pressed           = pyqtSignal()         # any left-press on the canvas
     items_dropped_on_hand    = pyqtSignal(list)     # list of CardItem/DeckItem dragged below viewport
     drag_near_hand           = pyqtSignal(bool)     # True while dragging within threshold of hand strip
     items_merged_into_deck   = pyqtSignal(list, object)  # (items, target DeckItem)
+
+    # Measurement signals (emitted only when measurement_active is True)
+    measurement_toggled  = pyqtSignal(bool)    # True = active, False = inactive (M key toggle)
+    measurement_press    = pyqtSignal(QPointF) # scene pos on left-press
+    measurement_move     = pyqtSignal(QPointF) # scene pos on mouse-move
+    measurement_release  = pyqtSignal(QPointF) # scene pos on left-release
+    measurement_waypoint = pyqtSignal()        # Space pressed while measuring (line waypoint)
+
+    # Drawing signals (emitted only when drawing_active is True)
+    draw_press    = pyqtSignal(QPointF)  # scene pos on left-press
+    draw_move     = pyqtSignal(QPointF)  # scene pos on mouse-move
+    draw_release  = pyqtSignal(QPointF)  # scene pos on left-release
+    draw_cancel   = pyqtSignal()         # right-click cancels current operation
 
     def __init__(self, scene, settings, parent=None):
         super().__init__(scene, parent)
@@ -62,6 +77,17 @@ class CanvasView(QGraphicsView):
         self._near_hand: bool = False  # tracks drag-near-hand state to avoid redundant signals
         self._merge_target = None  # DeckItem currently glowing as merge target
 
+        # Measurement tool state
+        self.measurement_active: bool = False
+        self._measuring: bool = False   # True while left button is held in measure mode
+
+        # Drawing tool state
+        self.drawing_active: bool = False
+        self._is_drawing: bool = False  # True while left button is held in draw mode
+
+        # Hand zone for drag-to-hand detection (px from viewport bottom)
+        self._hand_zone_h: int = 0
+
         from PyQt6.QtGui import QPainter
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
@@ -73,6 +99,14 @@ class CanvasView(QGraphicsView):
         # FullViewportUpdate prevents stale shadow-effect artifacts when items move
         self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
         self.setAcceptDrops(True)
+
+        # OpenGL viewport with vsync — eliminates strip tearing during fast pan
+        _fmt = QSurfaceFormat()
+        _fmt.setSwapInterval(1)
+        _gl = QOpenGLWidget()
+        _gl.setFormat(_fmt)
+        self.setViewport(_gl)
+        self.viewport().setAcceptDrops(True)
 
         # Enable keyboard focus
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -93,6 +127,10 @@ class CanvasView(QGraphicsView):
         self.scale(actual_factor, actual_factor)
         self._update_render_hints()
         self.zoom_changed.emit(self._scale)
+
+    def set_hand_zone(self, h: int) -> None:
+        """Set the height from viewport bottom that counts as 'near hand' for drag detection."""
+        self._hand_zone_h = h
 
     def zoom_in(self)  -> None: self._apply_zoom(ZOOM_FACTOR)
     def zoom_out(self) -> None: self._apply_zoom(1.0 / ZOOM_FACTOR)
@@ -120,6 +158,9 @@ class CanvasView(QGraphicsView):
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         delta = event.angleDelta().y()
+        if self._is_drawing:
+            event.accept()
+            return
         if self._held_item is not None:
             # Rotate held card/deck
             direction = 1 if delta > 0 else -1
@@ -143,15 +184,44 @@ class CanvasView(QGraphicsView):
             event.accept()
             return
 
+        # Measurement mode intercepts left-button entirely
+        if self.measurement_active and event.button() == Qt.MouseButton.LeftButton:
+            self._measuring = True
+            scene_pos = self.mapToScene(event.pos())
+            self.measurement_press.emit(scene_pos)
+            event.accept()
+            return
+
+        # Drawing mode: left-button starts draw, right-button cancels
+        if self.drawing_active:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._is_drawing = True
+                scene_pos = self.mapToScene(event.pos())
+                self.draw_press.emit(scene_pos)
+                event.accept()
+                return
+            if event.button() == Qt.MouseButton.RightButton:
+                if self._is_drawing:
+                    self._is_drawing = False
+                    self.draw_cancel.emit()
+                # Fall through so right-click context menu still fires
+                scene_pos = self.mapToScene(event.pos())
+                self.canvas_right_click.emit(scene_pos)
+                event.accept()
+                return
+
         if event.button() == Qt.MouseButton.LeftButton:
             self.canvas_pressed.emit()
             item = self.itemAt(event.pos())
+            # Treat locked items as empty space so rubber-band can still start
+            if item is not None and getattr(item, "locked", False):
+                item = None
             if item is not None:
                 # Dragging an item
                 self._held_item = item
                 self.setDragMode(QGraphicsView.DragMode.NoDrag)
             else:
-                # Rubber-band on empty space
+                # Rubber-band on empty space (or over a locked item)
                 self._held_item = None
                 self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
 
@@ -170,6 +240,19 @@ class CanvasView(QGraphicsView):
             event.accept()
             return
 
+        # Measurement move (emit regardless of button state so preview updates)
+        if self.measurement_active:
+            scene_pos = self.mapToScene(event.pos())
+            self.measurement_move.emit(scene_pos)
+            # Don't return — still allow normal move processing for cursor etc.
+
+        # Drawing move
+        if self.drawing_active and self._is_drawing:
+            scene_pos = self.mapToScene(event.pos())
+            self.draw_move.emit(scene_pos)
+            event.accept()
+            return
+
         super().mouseMoveEvent(event)
 
         # Emit hovered scene position for magnify
@@ -183,7 +266,11 @@ class CanvasView(QGraphicsView):
 
         # Emit drag-near-hand highlight signal
         if self._held_item is not None and isinstance(self._held_item, (CardItem, DeckItem)):
-            near = event.pos().y() >= (self.viewport().rect().bottom() - _HAND_THRESHOLD)
+            if self._hand_zone_h > 0:
+                threshold_y = self.viewport().rect().bottom() - self._hand_zone_h - _HAND_THRESHOLD
+                near = event.pos().y() >= threshold_y
+            else:
+                near = event.pos().y() >= (self.viewport().rect().bottom() - _HAND_THRESHOLD)
             if near != self._near_hand:
                 self._near_hand = near
                 self.drag_near_hand.emit(near)
@@ -209,6 +296,22 @@ class CanvasView(QGraphicsView):
         if event.button() == Qt.MouseButton.MiddleButton:
             self._panning = False
             self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+            event.accept()
+            return
+
+        # Measurement release
+        if self.measurement_active and event.button() == Qt.MouseButton.LeftButton and self._measuring:
+            self._measuring = False
+            scene_pos = self.mapToScene(event.pos())
+            self.measurement_release.emit(scene_pos)
+            event.accept()
+            return
+
+        # Drawing release
+        if self.drawing_active and event.button() == Qt.MouseButton.LeftButton and self._is_drawing:
+            self._is_drawing = False
+            scene_pos = self.mapToScene(event.pos())
+            self.draw_release.emit(scene_pos)
             event.accept()
             return
 
@@ -262,10 +365,15 @@ class CanvasView(QGraphicsView):
                         self.items_merged_into_deck.emit(to_merge, target_deck)
                     return
 
-                # Check if items were dragged down onto the hand strip
-                vp = self.viewport()
-                vp_bottom_global_y = vp.mapToGlobal(vp.rect().bottomLeft()).y()
-                if QCursor.pos().y() > vp_bottom_global_y:
+                # Check if items were dragged into the hand zone
+                if self._hand_zone_h > 0:
+                    threshold_y = self.viewport().rect().bottom() - self._hand_zone_h
+                    in_hand_zone = event.pos().y() >= threshold_y
+                else:
+                    vp = self.viewport()
+                    vp_bottom_global_y = vp.mapToGlobal(vp.rect().bottomLeft()).y()
+                    in_hand_zone = QCursor.pos().y() > vp_bottom_global_y
+                if in_hand_zone:
                     selected = scene.selectedItems() if scene else []
                     to_send = [
                         it for it in selected
@@ -280,10 +388,26 @@ class CanvasView(QGraphicsView):
     # ------------------------------------------------------------------
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
+        # Space during active line measurement → place waypoint
+        if (event.key() == Qt.Key.Key_Space and not event.isAutoRepeat()
+                and self.measurement_active and self._measuring):
+            self.measurement_waypoint.emit()
+            event.accept()
+            return
+
         # Space → temporary pan
         if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
             self._space_held = True
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            event.accept()
+            return
+
+        # M key → toggle measurement mode
+        if event.key() == Qt.Key.Key_M and not event.isAutoRepeat():
+            self.measurement_active = not self.measurement_active
+            if not self.measurement_active:
+                self._measuring = False
+            self.measurement_toggled.emit(self.measurement_active)
             event.accept()
             return
 
@@ -300,6 +424,10 @@ class CanvasView(QGraphicsView):
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
             event.accept()
             return
+        if not event.isAutoRepeat():
+            key_seq = _key_event_to_str(event)
+            if key_seq:
+                self.key_release_action.emit(key_seq)
         super().keyReleaseEvent(event)
 
     # ------------------------------------------------------------------

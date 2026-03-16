@@ -20,12 +20,12 @@ import shutil
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
-from PyQt6.QtCore import Qt, QSize, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QIcon, QKeySequence, QPixmap, QTransform
+from PyQt6.QtCore import Qt, QEasingCurve, QPropertyAnimation, QSize, QTimer, pyqtProperty, pyqtSignal
+from PyQt6.QtGui import QBrush, QColor, QFont, QIcon, QKeySequence, QPainter, QPainterPath, QPixmap, QTransform
 from PyQt6.QtWidgets import (
     QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView,
-    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton,
     QScrollArea, QSlider, QSizePolicy, QSpinBox, QSplitter, QStackedWidget,
     QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
@@ -248,6 +248,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._make_hotkeys_tab(),  "Hotkeys")
         tabs.addTab(self._make_canvas_tab(),   "Canvas")
         tabs.addTab(self._make_display_tab(),  "Display")
+        tabs.addTab(self._make_system_tab(),   "System")
         layout.addWidget(tabs)
 
         btns = QDialogButtonBox(
@@ -487,10 +488,23 @@ class SettingsDialog(QDialog):
         self._auto_save_chk.setChecked(self._settings.display("auto_save_on_close"))
         form.addRow("Session:", self._auto_save_chk)
 
-        # UI theme
-        self._canvas_theme_chk = QCheckBox("Tint UI chrome to match canvas colour")
-        self._canvas_theme_chk.setChecked(self._settings.display("use_canvas_theme"))
-        form.addRow("UI Theme:", self._canvas_theme_chk)
+        return w
+
+    # ------------------------------------------------------------------
+    # System tab
+    # ------------------------------------------------------------------
+
+    def _make_system_tab(self) -> QWidget:
+        w = QWidget()
+        form = QFormLayout(w)
+        form.setContentsMargins(10, 10, 10, 10)
+        form.setSpacing(12)
+
+        self._undo_stack_spin = QSpinBox()
+        self._undo_stack_spin.setRange(1, 100)
+        self._undo_stack_spin.setValue(self._settings.system("undo_stack_size"))
+        self._undo_stack_spin.setSuffix(" levels")
+        form.addRow("Undo History:", self._undo_stack_spin)
 
         return w
 
@@ -526,7 +540,9 @@ class SettingsDialog(QDialog):
         self._settings.set_display("auto_save_on_close", self._auto_save_chk.isChecked())
         self._settings.set_display("rotation_step", self._rotation_step_combo.currentData())
         self._settings.set_display("image_import_size", self._img_import_size_spin.value())
-        self._settings.set_display("use_canvas_theme", self._canvas_theme_chk.isChecked())
+
+        # System
+        self._settings.set_system("undo_stack_size", self._undo_stack_spin.value())
 
         self._settings.save()
         self.accept()
@@ -594,39 +610,87 @@ class HotkeyCaptureDialog(QDialog):
 # ==============================================================================
 
 class RecallDialog(QDialog):
+    """Recall dialog — resets selected decks to their original full card lists."""
+
     def __init__(self, deck_models: dict, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Recall Cards")
-        self.setMinimumWidth(380)
+        self.setMinimumWidth(420)
+        self.setMinimumHeight(340)
         self.setWindowModality(Qt.WindowModality.NonModal)
-        self._deck_models = deck_models
+        self._deck_models = deck_models  # {id: DeckModel}
+        self._deck_checks: dict = {}     # {id: QCheckBox}
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 16, 16, 16)
-        lay.setSpacing(12)
+        lay.setSpacing(10)
 
-        lay.addWidget(QLabel("Recall cards to their respective decks:"))
+        lay.addWidget(QLabel(
+            "Select decks to recall. Each selected deck will be fully restored\n"
+            "to its original card list in original order."
+        ))
 
-        # What to recall
-        scope_group = QGroupBox("Recall from:")
-        scope_lay = QVBoxLayout(scope_group)
-        self._canvas_chk = QCheckBox("Cards on canvas")
-        self._canvas_chk.setChecked(True)
-        self._hand_chk   = QCheckBox("Cards in hand")
-        self._hand_chk.setChecked(False)
-        scope_lay.addWidget(self._canvas_chk)
-        scope_lay.addWidget(self._hand_chk)
-        lay.addWidget(scope_group)
+        # All Decks toggle
+        self._all_chk = QCheckBox("All Decks")
+        self._all_chk.setChecked(True)
+        self._all_chk.toggled.connect(self._on_all_toggled)
+        lay.addWidget(self._all_chk)
 
-        # Which decks
-        deck_group = QGroupBox("Return to:")
-        deck_lay = QVBoxLayout(deck_group)
-        self._all_decks_chk = QCheckBox("All decks")
-        self._all_decks_chk.setChecked(True)
-        deck_lay.addWidget(self._all_decks_chk)
-        lay.addWidget(deck_group)
+        # Per-deck list
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMinimumHeight(160)
+        inner = QWidget()
+        inner_lay = QVBoxLayout(inner)
+        inner_lay.setContentsMargins(6, 6, 6, 6)
+        inner_lay.setSpacing(6)
 
-        # Shuffle after recall
+        for dm in deck_models.values():
+            row = QWidget()
+            row_lay = QHBoxLayout(row)
+            row_lay.setContentsMargins(0, 0, 0, 0)
+            row_lay.setSpacing(8)
+
+            # Card back thumbnail
+            thumb_lbl = QLabel()
+            thumb_lbl.setFixedSize(36, 50)
+            if dm.back_path:
+                pix = QPixmap(dm.back_path)
+                if not pix.isNull():
+                    thumb_lbl.setPixmap(pix.scaled(
+                        36, 50,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    ))
+            row_lay.addWidget(thumb_lbl)
+
+            chk = QCheckBox(f"{dm.name}  ({dm.count}/{len(dm.all_cards)} cards remaining)")
+            chk.setChecked(True)
+            chk.toggled.connect(self._on_deck_toggled)
+            row_lay.addWidget(chk, 1)
+
+            inner_lay.addWidget(row)
+            self._deck_checks[dm.id] = chk
+
+        inner_lay.addStretch()
+        scroll.setWidget(inner)
+        lay.addWidget(scroll, 1)
+
+        # Options
+        self._include_hand_chk = QCheckBox("Include cards in hand")
+        self._include_hand_chk.setChecked(True)
+        self._include_hand_chk.setToolTip(
+            "If unchecked, hand cards are left in hand and excluded from the restored deck."
+        )
+        lay.addWidget(self._include_hand_chk)
+
+        self._restore_deleted_chk = QCheckBox("Restore deleted cards")
+        self._restore_deleted_chk.setChecked(True)
+        self._restore_deleted_chk.setToolTip(
+            "If unchecked, cards that were explicitly deleted will not be restored."
+        )
+        lay.addWidget(self._restore_deleted_chk)
+
         self._shuffle_after_chk = QCheckBox("Shuffle decks after recall")
         self._shuffle_after_chk.setChecked(False)
         lay.addWidget(self._shuffle_after_chk)
@@ -639,11 +703,24 @@ class RecallDialog(QDialog):
         btns.rejected.connect(self.reject)
         lay.addWidget(btns)
 
+    def _on_all_toggled(self, checked: bool) -> None:
+        for chk in self._deck_checks.values():
+            chk.blockSignals(True)
+            chk.setChecked(checked)
+            chk.blockSignals(False)
+
+    def _on_deck_toggled(self, _checked: bool) -> None:
+        all_checked = all(c.isChecked() for c in self._deck_checks.values())
+        self._all_chk.blockSignals(True)
+        self._all_chk.setChecked(all_checked)
+        self._all_chk.blockSignals(False)
+
     def result_options(self) -> dict:
         return {
-            "from_canvas":    self._canvas_chk.isChecked(),
-            "from_hand":      self._hand_chk.isChecked(),
-            "shuffle_after":  self._shuffle_after_chk.isChecked(),
+            "deck_ids":        [did for did, chk in self._deck_checks.items() if chk.isChecked()],
+            "include_hand":    self._include_hand_chk.isChecked(),
+            "restore_deleted": self._restore_deleted_chk.isChecked(),
+            "shuffle_after":   self._shuffle_after_chk.isChecked(),
         }
 
 
@@ -772,6 +849,39 @@ class SessionPickerDialog(QDialog):
 # Startup Dialog
 # ==============================================================================
 
+def _make_logo_label(rel_path: str, color: str, display_w: int) -> QLabel:
+    """Load an SVG from a project-relative path, tint it, and return a centred QLabel."""
+    from PyQt6.QtSvg import QSvgRenderer
+    from PyQt6.QtGui import QImage
+    from PyQt6.QtCore import QSize as _QSize
+    import sys as _sys
+    _base = Path(_sys.executable).parent if getattr(_sys, "frozen", False) else Path(__file__).parent.parent
+    svg_path = _base / rel_path
+    renderer = QSvgRenderer(str(svg_path))
+    vb = renderer.viewBox()
+    aspect = vb.width() / vb.height() if vb.height() else 1.0
+    display_h = int(display_w / aspect)
+    size = _QSize(display_w, display_h)
+    # Render SVG into an alpha-capable image
+    mask_img = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
+    mask_img.fill(0)
+    p = QPainter(mask_img)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    renderer.render(p)
+    p.end()
+    # Tint: solid colour masked by SVG alpha
+    tinted = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
+    tinted.fill(QColor(color))
+    p2 = QPainter(tinted)
+    p2.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+    p2.drawImage(0, 0, mask_img)
+    p2.end()
+    lbl = QLabel()
+    lbl.setPixmap(QPixmap.fromImage(tinted))
+    lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    return lbl
+
+
 class StartupDialog(QDialog):
     """Shown on launch — lets user start a new session or load an existing one."""
 
@@ -788,10 +898,8 @@ class StartupDialog(QDialog):
         lay.setContentsMargins(28, 24, 28, 24)
         lay.setSpacing(12)
 
-        title = QLabel("Welcome to SoloCanvas")
-        title.setStyleSheet("font-size: 16px; font-weight: bold;")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(title)
+        logo = _make_logo_label("resources/images/logo.svg", "#FFFFFF", 280)
+        lay.addWidget(logo)
 
         lay.addSpacing(6)
 
@@ -826,6 +934,15 @@ class StartupDialog(QDialog):
         notice.setStyleSheet("font-size: 9px;")
         lay.addWidget(notice)
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self.parent():
+            p = self.parent()
+            self.move(
+                p.x() + (p.width()  - self.width())  // 2,
+                p.y() + (p.height() - self.height()) // 2,
+            )
+
     def _do_load(self) -> None:
         dlg = SessionPickerDialog(self._sessions, self)
         dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
@@ -839,6 +956,8 @@ class StartupDialog(QDialog):
 # ==============================================================================
 
 class BackgroundDialog(QDialog):
+    color_applied = pyqtSignal()   # fired each time Apply is clicked
+
     def __init__(self, canvas_scene, parent=None):
         super().__init__(parent)
         self._scene = canvas_scene
@@ -919,6 +1038,7 @@ class BackgroundDialog(QDialog):
     def _apply(self) -> None:
         self._scene.set_background(mode="color", color=self._color, image_path=None)
         self._scene.set_grid_color(self._grid_color)
+        self.color_applied.emit()
 
 
 # ==============================================================================
@@ -1279,6 +1399,9 @@ class CardPickerDialog(QDialog):
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
+                if getattr(card, "reversed", False):
+                    from PyQt6.QtGui import QTransform
+                    pix = pix.transformed(QTransform().rotate(180))
                 item.setIcon(QIcon(pix))
             self._list.addItem(item)
             shown += 1
@@ -1504,37 +1627,26 @@ class DiceColorDialog(QDialog):
         name_row.addWidget(self._name_edit, 1)
         lay.addLayout(name_row)
 
-        # Apply color 1 to all dice
         apply_all_btn = QPushButton("Apply Color 1 to All Dice")
         apply_all_btn.clicked.connect(self._apply_to_all)
         lay.addWidget(apply_all_btn)
 
-        # Column header
+        # Column headers
         hdr = QHBoxLayout()
         hdr.setSpacing(8)
-        lbl_die = QLabel("Die")
-        lbl_die.setFixedWidth(30)
-        hdr.addWidget(lbl_die)
-        lbl_c1 = QLabel("Color 1")
-        lbl_c1.setFixedWidth(70)
-        hdr.addWidget(lbl_c1)
-        lbl_c2 = QLabel("Color 2")
-        lbl_c2.setFixedWidth(70)
-        hdr.addWidget(lbl_c2)
-        lbl_mode = QLabel("Mode")
-        lbl_mode.setFixedWidth(90)
-        hdr.addWidget(lbl_mode)
-        lbl_ctr = QLabel("Center")
-        hdr.addWidget(lbl_ctr, 1)
-        hdr.addWidget(QLabel(""), 0)  # preview spacer
+        lbl_die = QLabel("Die");  lbl_die.setFixedWidth(30);  hdr.addWidget(lbl_die)
+        lbl_c1  = QLabel("Color 1"); lbl_c1.setFixedWidth(70);  hdr.addWidget(lbl_c1)
+        lbl_c2  = QLabel("Color 2"); lbl_c2.setFixedWidth(70);  hdr.addWidget(lbl_c2)
+        lbl_mode = QLabel("Mode");  lbl_mode.setFixedWidth(90); hdr.addWidget(lbl_mode)
+        lbl_ctr = QLabel("Center"); hdr.addWidget(lbl_ctr, 1)
+        hdr.addWidget(QLabel(""), 0)
         lay.addLayout(hdr)
 
-        # Per-die data stores
-        self._specs:         dict = {}   # die_type → spec dict
-        self._swatch_btns1:  dict = {}
-        self._swatch_btns2:  dict = {}
-        self._mode_combos:   dict = {}
-        self._sliders:       dict = {}
+        self._specs:          dict = {}
+        self._swatch_btns1:   dict = {}
+        self._swatch_btns2:   dict = {}
+        self._mode_combos:    dict = {}
+        self._sliders:        dict = {}
         self._preview_labels: dict = {}
 
         grid = QWidget()
@@ -1543,7 +1655,6 @@ class DiceColorDialog(QDialog):
         grid_lay.setContentsMargins(0, 0, 0, 0)
 
         for die_type in DIE_TYPES:
-            # Resolve initial spec
             init_color1 = "#ffffff"
             init_color2 = "#000000"
             init_mode   = "solid"
@@ -1556,8 +1667,18 @@ class DiceColorDialog(QDialog):
                 elif isinstance(c, dict):
                     init_color1 = c.get("color1", "#ffffff")
                     init_color2 = c.get("color2", "#000000")
-                    init_mode   = c.get("type", "solid")
+                    init_mode   = c.get("type",   "solid")
                     init_center = float(c.get("center", 0.5))
+            elif self._initial:
+                # Die type missing from old set — inherit first available color
+                first = next(iter(self._initial.colors.values()), "#ffffff")
+                if isinstance(first, str):
+                    init_color1 = first
+                elif isinstance(first, dict):
+                    init_color1 = first.get("color1", "#ffffff")
+                    init_color2 = first.get("color2", "#000000")
+                    init_mode   = first.get("type",   "solid")
+                    init_center = float(first.get("center", 0.5))
 
             self._specs[die_type] = {
                 "type":   init_mode,
@@ -1571,9 +1692,7 @@ class DiceColorDialog(QDialog):
             row_lay.setContentsMargins(0, 0, 0, 0)
             row_lay.setSpacing(8)
 
-            lbl = QLabel(die_type)
-            lbl.setFixedWidth(30)
-            row_lay.addWidget(lbl)
+            lbl = QLabel(die_type); lbl.setFixedWidth(30); row_lay.addWidget(lbl)
 
             btn1 = QPushButton()
             btn1.setFixedSize(70, 24)
@@ -1625,11 +1744,9 @@ class DiceColorDialog(QDialog):
         lay.addWidget(grid)
 
         btn_row = QHBoxLayout()
-        save_btn = QPushButton("Save Set")
-        save_btn.setDefault(True)
+        save_btn = QPushButton("Save Set"); save_btn.setDefault(True)
         save_btn.clicked.connect(self._save)
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.clicked.connect(self.reject)
+        cancel_btn = QPushButton("Cancel"); cancel_btn.clicked.connect(self.reject)
         btn_row.addStretch()
         btn_row.addWidget(cancel_btn)
         btn_row.addWidget(save_btn)
@@ -1694,17 +1811,11 @@ class DiceColorDialog(QDialog):
             return
         spec = self._specs.get(die_type, {"type": "solid", "color1": "#ffffff", "color2": "#000000", "center": 0.5})
         try:
-            from PyQt6.QtSvg import QSvgRenderer
-            from PyQt6.QtCore import QByteArray, QRectF
-            from PyQt6.QtGui import QImage, QPainter, QPixmap
-            svg_bytes = self._manager.recolor_svg(die_type, spec)
-            renderer = QSvgRenderer(QByteArray(svg_bytes))
-            image = QImage(32, 32, QImage.Format.Format_ARGB32_Premultiplied)
-            image.fill(0)
-            p = QPainter(image)
-            renderer.render(p, QRectF(0, 0, 32, 32))
-            p.end()
-            preview.setPixmap(QPixmap.fromImage(image))
+            pix = self._manager.get_face_pixmap_for_preview(die_type, spec, 32)
+            if pix.isNull():
+                preview.setText("?")
+            else:
+                preview.setPixmap(pix)
         except Exception:
             preview.setText("?")
 
@@ -1726,11 +1837,7 @@ class DiceColorDialog(QDialog):
         from .dice_manager import DiceSet
         colors = {}
         for dt, spec in self._specs.items():
-            # Store solid colors as plain strings for backward compatibility
-            if spec["type"] == "solid":
-                colors[dt] = spec["color1"]
-            else:
-                colors[dt] = dict(spec)
+            colors[dt] = spec["color1"] if spec["type"] == "solid" else dict(spec)
         self.result_set = DiceSet(name=name, colors=colors, is_builtin=False)
         self.accept()
 
@@ -1817,11 +1924,15 @@ class DiceLibraryDialog(QDialog):
 
         add_btn = QPushButton("Add Selected")
         add_btn.clicked.connect(self._add_selected)
+        add_set_btn = QPushButton("Add Set")
+        add_set_btn.setToolTip("Add one of each die type from the selected set")
+        add_set_btn.clicked.connect(self._add_set)
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.reject)
 
         btn_bar = QHBoxLayout()
         btn_bar.addWidget(add_btn)
+        btn_bar.addWidget(add_set_btn)
         btn_bar.addStretch()
         btn_bar.addWidget(close_btn)
         right_lay.addLayout(btn_bar)
@@ -1859,7 +1970,7 @@ class DiceLibraryDialog(QDialog):
         if not self._selected_set:
             return
         for die_type in DIE_TYPES:
-            pix = self._manager.get_pixmap(die_type, self._selected_set, 64)
+            pix = self._manager.get_preview_pixmap(die_type, self._selected_set, 64)
             item = QListWidgetItem(die_type)
             from PyQt6.QtGui import QIcon
             item.setIcon(QIcon(pix))
@@ -1873,6 +1984,13 @@ class DiceLibraryDialog(QDialog):
             return
         pairs = [(item.data(Qt.ItemDataRole.UserRole), self._selected_set)
                  for item in selected]
+        self.dice_requested.emit(pairs)
+
+    def _add_set(self) -> None:
+        if not self._selected_set:
+            return
+        from .dice_manager import DIE_TYPES
+        pairs = [(dt, self._selected_set) for dt in DIE_TYPES]
         self.dice_requested.emit(pairs)
 
     def _add_die_and_close(self, item) -> None:
@@ -2141,6 +2259,64 @@ class MissingImageDialog(QDialog):
 # ---------------------------------------------------------------------------
 
 _IMG_EXTS = {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tiff', '.tif', '.webp'}
+_CHILD_ROW_BG = "#11111b"   # slightly darker bg for child image rows in expanded folders
+
+
+def _no_ctx(w: QWidget) -> QWidget:
+    """Prevent a cell widget from swallowing right-click events so they reach the viewport."""
+    w.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+    for child in w.findChildren(QWidget):
+        child.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+    return w
+
+
+class RotatingArrowButton(QPushButton):
+    """A flat button that draws a right-pointing arrow and rotates it smoothly."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._angle: float = 0.0
+        self.setFixedSize(26, 26)
+        self.setFlat(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet("QPushButton { border: none; background: transparent; }")
+
+        self._anim = QPropertyAnimation(self, b"arrow_angle")
+        self._anim.setDuration(150)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def _get_angle(self) -> float:
+        return self._angle
+
+    def _set_angle(self, v: float) -> None:
+        self._angle = v
+        self.update()
+
+    arrow_angle = pyqtProperty(float, _get_angle, _set_angle)
+
+    def set_expanded(self, expanded: bool, animated: bool = False) -> None:
+        target = 90.0 if expanded else 0.0
+        if animated:
+            self._anim.stop()
+            self._anim.setStartValue(self._angle)
+            self._anim.setEndValue(target)
+            self._anim.start()
+        else:
+            self._angle = target
+            self.update()
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.translate(self.width() / 2, self.height() / 2)
+        p.rotate(self._angle)
+        path = QPainterPath()
+        path.moveTo(-4.5, -6.0)
+        path.lineTo(5.5, 0.0)
+        path.lineTo(-4.5, 6.0)
+        path.closeSubpath()
+        p.fillPath(path, QColor("#a6adc8"))
+        p.end()
 
 
 class ImageLibraryDialog(QDialog):
@@ -2154,12 +2330,13 @@ class ImageLibraryDialog(QDialog):
     lets the user spawn copies onto the canvas.
     """
 
-    duplicate_requested   = pyqtSignal(object)   # ImageItem
-    center_view_requested = pyqtSignal(object)   # ImageItem
-    localize_requested    = pyqtSignal(list)      # list[ImageItem]
-    spawn_requested       = pyqtSignal(str)       # absolute path string
-    rename_requested      = pyqtSignal(str, str)  # old_path, new_path
-    delete_from_library_requested = pyqtSignal(str)  # path of deleted file
+    duplicate_requested        = pyqtSignal(object)   # ImageItem
+    center_view_requested      = pyqtSignal(object)   # ImageItem
+    localize_requested         = pyqtSignal(list)     # list[ImageItem]
+    spawn_requested            = pyqtSignal(str)      # absolute path string
+    rename_requested           = pyqtSignal(str, str) # old_path, new_path
+    delete_from_library_requested = pyqtSignal(str)   # path of deleted file
+    remove_from_scene_requested   = pyqtSignal(list)  # list[ImageItem]
 
     def __init__(self, image_items_ref: list, images_dir: Path, parent=None):
         super().__init__(parent)
@@ -2173,7 +2350,8 @@ class ImageLibraryDialog(QDialog):
         self._items_ref       = image_items_ref   # live reference to MainWindow._image_items
         self._images_dir      = images_dir
         self._expanded_folders: set = set()       # folder names currently expanded
-        self._checked_images:  set = set()        # str paths of checked images
+        self._checked_images:  set = set()        # str paths of checked images (Library tab)
+        self._checked_scene:   set = set()        # ImageItem objects checked in Scene tab
         self._build_ui()
         self.refresh()
 
@@ -2192,6 +2370,7 @@ class ImageLibraryDialog(QDialog):
         lbl = QLabel()
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lbl.setFixedSize(52, 52)
+        lbl.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
         p = Path(path)
         if p.exists():
             pix = QPixmap(str(p)).scaled(
@@ -2205,13 +2384,6 @@ class ImageLibraryDialog(QDialog):
         lbl.setText("⚠")
         lbl.setStyleSheet("font-size: 18px;")
         return lbl
-
-    def _action_btn(self, text: str, callback, enabled: bool = True) -> QPushButton:
-        btn = QPushButton(text)
-        btn.setFixedSize(80, 26)
-        btn.setEnabled(enabled)
-        btn.clicked.connect(callback)
-        return btn
 
     # ------------------------------------------------------------------
     # UI construction
@@ -2235,26 +2407,21 @@ class ImageLibraryDialog(QDialog):
         vlay.setSpacing(6)
 
         self._scene_table = QTableWidget()
-        self._scene_table.setColumnCount(6)
-        self._scene_table.setHorizontalHeaderLabels(
-            ["", "Status", "Name", "", "", ""]
-        )
+        self._scene_table.setColumnCount(4)
+        self._scene_table.setHorizontalHeaderLabels(["", "", "Status", "Name"])
         hdr = self._scene_table.horizontalHeader()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self._scene_table.setColumnWidth(0, 58)
+        self._scene_table.setColumnWidth(0, 32)   # checkbox
         hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        self._scene_table.setColumnWidth(1, 92)
-        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        self._scene_table.setColumnWidth(3, 88)
-        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        self._scene_table.setColumnWidth(4, 82)
-        hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
-        self._scene_table.setColumnWidth(5, 82)
+        self._scene_table.setColumnWidth(1, 58)   # thumbnail
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self._scene_table.setColumnWidth(2, 92)   # status
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)  # name
         self._scene_table.verticalHeader().setVisible(False)
         self._scene_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._scene_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
         self._scene_table.setAlternatingRowColors(False)
+        self._scene_table.cellDoubleClicked.connect(self._on_scene_double_click)
         vlay.addWidget(self._scene_table)
 
         btm = QHBoxLayout()
@@ -2262,10 +2429,19 @@ class ImageLibraryDialog(QDialog):
         ref_btn = QPushButton("Refresh")
         ref_btn.clicked.connect(self.refresh)
         btm.addWidget(ref_btn)
+        loc_btn = QPushButton("Localize")
+        loc_btn.setToolTip("Localize all checked linked images")
+        loc_btn.clicked.connect(self._localize_checked_scene)
+        btm.addWidget(loc_btn)
+        spawn_btn = QPushButton("Spawn")
+        spawn_btn.setToolTip("Spawn a copy of each checked image onto the canvas")
+        spawn_btn.clicked.connect(self._spawn_checked_scene)
+        btm.addWidget(spawn_btn)
+        rem_btn = QPushButton("Remove")
+        rem_btn.setToolTip("Remove checked items from the canvas")
+        rem_btn.clicked.connect(self._remove_checked_scene)
+        btm.addWidget(rem_btn)
         btm.addStretch()
-        loc_all_btn = QPushButton("Localize All Linked")
-        loc_all_btn.clicked.connect(self._localize_all_linked)
-        btm.addWidget(loc_all_btn)
         vlay.addLayout(btm)
         return w
 
@@ -2280,26 +2456,21 @@ class ImageLibraryDialog(QDialog):
         note.setWordWrap(True)
         vlay.addWidget(note)
 
-        # Columns: toggle/cb | thumb | name | Rename | Spawn | Delete
+        # Columns: arrow/cb (0) | thumb (1) | name (2)
         self._lib_table = QTableWidget()
-        self._lib_table.setColumnCount(6)
-        self._lib_table.setHorizontalHeaderLabels(["", "", "Name", "", "", ""])
+        self._lib_table.setColumnCount(3)
+        self._lib_table.setHorizontalHeaderLabels(["", "", "Name"])
         lib_hdr = self._lib_table.horizontalHeader()
         lib_hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self._lib_table.setColumnWidth(0, 32)
+        self._lib_table.setColumnWidth(0, 32)   # arrow / checkbox
         lib_hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        self._lib_table.setColumnWidth(1, 58)
-        lib_hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        lib_hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        self._lib_table.setColumnWidth(3, 82)
-        lib_hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        self._lib_table.setColumnWidth(4, 82)
-        lib_hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
-        self._lib_table.setColumnWidth(5, 82)
+        self._lib_table.setColumnWidth(1, 62)   # thumbnail
+        lib_hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)  # name
         self._lib_table.verticalHeader().setVisible(False)
         self._lib_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._lib_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
         self._lib_table.setAlternatingRowColors(False)
+        self._lib_table.cellDoubleClicked.connect(self._on_lib_double_click)
         vlay.addWidget(self._lib_table)
 
         btm = QHBoxLayout()
@@ -2313,6 +2484,18 @@ class ImageLibraryDialog(QDialog):
         move_btn = QPushButton("Move")
         move_btn.clicked.connect(self._move_checked_images)
         btm.addWidget(move_btn)
+        spawn_btn = QPushButton("Spawn")
+        spawn_btn.setToolTip("Spawn a copy of each checked image onto the canvas")
+        spawn_btn.clicked.connect(self._bulk_spawn_lib)
+        btm.addWidget(spawn_btn)
+        delete_btn = QPushButton("Delete")
+        delete_btn.setToolTip("Delete all checked images from the library")
+        delete_btn.clicked.connect(self._bulk_delete_lib)
+        btm.addWidget(delete_btn)
+        rename_btn = QPushButton("Rename")
+        rename_btn.setToolTip("Rename the single checked image")
+        rename_btn.clicked.connect(self._rename_checked_lib)
+        btm.addWidget(rename_btn)
         btm.addStretch()
         open_btn = QPushButton("Open Folder")
         open_btn.clicked.connect(self._open_images_folder)
@@ -2329,6 +2512,7 @@ class ImageLibraryDialog(QDialog):
         self._populate_library_tab()
 
     def _populate_scene_tab(self) -> None:
+        self._checked_scene = set()  # reset checkboxes on every refresh
         table = self._scene_table
         table.setRowCount(0)
         table.setRowCount(len(self._items_ref))
@@ -2336,57 +2520,34 @@ class ImageLibraryDialog(QDialog):
         for row, item in enumerate(self._items_ref):
             table.setRowHeight(row, 54)
 
-            # Thumbnail
-            table.setCellWidget(row, 0, self._thumb_label(item._image_path))
+            # Col 0: checkbox
+            cb_w = QWidget()
+            cb_hl = QHBoxLayout(cb_w)
+            cb_hl.setContentsMargins(0, 0, 0, 0)
+            cb_hl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cb = QCheckBox()
+            cb.stateChanged.connect(
+                lambda state, it=item: self._on_scene_check(it, bool(state))
+            )
+            cb_hl.addWidget(cb)
+            table.setCellWidget(row, 0, _no_ctx(cb_w))
 
-            # Status badge
+            # Col 1: thumbnail
+            table.setCellWidget(row, 1, self._thumb_label(item._image_path))
+
+            # Col 2: status badge
             localized = self._is_localized(item._image_path)
             status_item = QTableWidgetItem("📁  Local" if localized else "🔗  Linked")
             status_item.setForeground(
                 QColor("#a6e3a1") if localized else QColor("#f9e2af")
             )
             status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            table.setItem(row, 1, status_item)
+            table.setItem(row, 2, status_item)
 
-            # Filename + path tooltip
+            # Col 3: filename + path tooltip
             name_item = QTableWidgetItem(Path(item._image_path).name)
             name_item.setToolTip(item._image_path)
-            table.setItem(row, 2, name_item)
-
-            # Duplicate button
-            def _dup_w(it=item):
-                w = QWidget()
-                hl = QHBoxLayout(w)
-                hl.setContentsMargins(3, 3, 3, 3)
-                hl.addWidget(self._action_btn(
-                    "Duplicate", lambda checked=False, i=it: self.duplicate_requested.emit(i)
-                ))
-                return w
-            table.setCellWidget(row, 3, _dup_w())
-
-            # Center button
-            def _ctr_w(it=item):
-                w = QWidget()
-                hl = QHBoxLayout(w)
-                hl.setContentsMargins(3, 3, 3, 3)
-                hl.addWidget(self._action_btn(
-                    "Center", lambda checked=False, i=it: self.center_view_requested.emit(i)
-                ))
-                return w
-            table.setCellWidget(row, 4, _ctr_w())
-
-            # Localize button (disabled if already local)
-            def _loc_w(it=item, loc=localized):
-                w = QWidget()
-                hl = QHBoxLayout(w)
-                hl.setContentsMargins(3, 3, 3, 3)
-                hl.addWidget(self._action_btn(
-                    "Localize",
-                    lambda checked=False, i=it: self.localize_requested.emit([i]),
-                    enabled=not loc,
-                ))
-                return w
-            table.setCellWidget(row, 5, _loc_w())
+            table.setItem(row, 3, name_item)
 
     # ------------------------------------------------------------------
     # Library tab helpers
@@ -2408,98 +2569,72 @@ class ImageLibraryDialog(QDialog):
     def _lib_folder_images(self, folder: Path) -> list:
         return sorted(f for f in folder.iterdir() if self._is_image_file(f))
 
-    def _make_checkbox_widget(self, path: str) -> QWidget:
-        w = QWidget()
-        hl = QHBoxLayout(w)
-        hl.setContentsMargins(6, 0, 0, 0)
-        hl.setAlignment(Qt.AlignmentFlag.AlignVCenter)
-        cb = QCheckBox()
-        cb.setChecked(path in self._checked_images)
-        cb.stateChanged.connect(lambda state, p=path: self._on_image_check(p, bool(state)))
-        hl.addWidget(cb)
-        return w
-
-    def _make_delete_btn_widget(self, callback) -> QWidget:
-        w = QWidget()
-        hl = QHBoxLayout(w)
-        hl.setContentsMargins(3, 3, 3, 3)
-        btn = self._action_btn("Delete", callback)
-        btn.setStyleSheet(
-            "QPushButton { background: #3b1e1e; color: #f38ba8;"
-            " border: 1px solid #5a2020; border-radius: 5px; padding: 5px 14px; }"
-            "QPushButton:hover { background: #5a2020; }"
-        )
-        hl.addWidget(btn)
-        return w
-
     def _add_folder_row(self, table: QTableWidget, row: int, folder: Path) -> None:
-        table.setRowHeight(row, 36)
+        table.setRowHeight(row, 40)
         expanded = folder.name in self._expanded_folders
-        arrow = "▼" if expanded else "▶"
 
-        toggle_btn = QPushButton(arrow)
-        toggle_btn.setFixedSize(26, 26)
-        toggle_btn.setStyleSheet("QPushButton { border: none; font-size: 11px; }")
-        toggle_btn.clicked.connect(lambda _checked, n=folder.name: self._toggle_folder(n))
-        toggle_w = QWidget()
-        toggle_hl = QHBoxLayout(toggle_w)
-        toggle_hl.setContentsMargins(3, 0, 0, 0)
-        toggle_hl.addWidget(toggle_btn)
-        table.setCellWidget(row, 0, toggle_w)
+        # Col 0: rotating arrow button
+        arrow_btn = RotatingArrowButton()
+        arrow_btn.set_expanded(expanded, animated=False)
+        arrow_btn.clicked.connect(
+            lambda _c=False, n=folder.name: self._toggle_folder_anim(n)
+        )
+        _no_ctx(arrow_btn)
+        table.setCellWidget(row, 0, arrow_btn)
 
+        # Col 1: folder icon
         icon_lbl = QLabel("📁")
+        icon_lbl.setStyleSheet("font-size: 20px;")
         icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        icon_lbl.setFixedSize(58, 36)
+        _no_ctx(icon_lbl)
         table.setCellWidget(row, 1, icon_lbl)
 
+        # Col 2: name
         img_count = len(self._lib_folder_images(folder))
         name_item = QTableWidgetItem(f"  {folder.name}  ({img_count})")
-        name_item.setData(Qt.ItemDataRole.UserRole, str(folder))
+        name_item.setData(Qt.ItemDataRole.UserRole, ("folder", folder.name, str(folder)))
         font = name_item.font()
         font.setBold(True)
         name_item.setFont(font)
         table.setItem(row, 2, name_item)
 
-        def _ren_w(p=folder):
-            w = QWidget(); hl = QHBoxLayout(w); hl.setContentsMargins(3, 3, 3, 3)
-            hl.addWidget(self._action_btn("Rename", lambda _c=False, fp=p: self._rename_lib_folder(fp)))
-            return w
-        table.setCellWidget(row, 3, _ren_w())
-
-        # col 4: empty (no Spawn for folders)
-        table.setCellWidget(row, 4, QWidget())
-
-        table.setCellWidget(row, 5, self._make_delete_btn_widget(
-            lambda _c=False, p=folder: self._delete_lib_folder(p)
-        ))
-
     def _add_image_row(self, table: QTableWidget, row: int, fpath: Path, indent: bool = False) -> None:
         table.setRowHeight(row, 54)
 
-        table.setCellWidget(row, 0, self._make_checkbox_widget(str(fpath)))
-        table.setCellWidget(row, 1, self._thumb_label(str(fpath)))
+        bg = _CHILD_ROW_BG if indent else ""
 
-        prefix = "    " if indent else ""
-        name_item = QTableWidgetItem(prefix + fpath.name)
+        # Col 0: checkbox
+        cb_w = QWidget()
+        cb_hl = QHBoxLayout(cb_w)
+        cb_hl.setContentsMargins(0, 0, 0, 0)
+        cb_hl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        cb = QCheckBox()
+        cb.setChecked(str(fpath) in self._checked_images)
+        cb.stateChanged.connect(
+            lambda state, p=str(fpath): self._on_image_check(p, bool(state))
+        )
+        cb_hl.addWidget(cb)
+        if bg:
+            cb_w.setStyleSheet(f"background-color: {bg};")
+        table.setCellWidget(row, 0, _no_ctx(cb_w))
+
+        # Col 1: thumbnail wrapped in a full-cell container so bg fills the whole cell
+        thumb_w = QWidget()
+        thumb_hl = QHBoxLayout(thumb_w)
+        thumb_hl.setContentsMargins(0, 0, 0, 0)
+        thumb_hl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        thumb_hl.addWidget(self._thumb_label(str(fpath)))
+        if bg:
+            thumb_w.setStyleSheet(f"background-color: {bg};")
+        table.setCellWidget(row, 1, _no_ctx(thumb_w))
+
+        # Col 2: name
+        name_item = QTableWidgetItem(fpath.name)
         name_item.setToolTip(str(fpath))
-        name_item.setData(Qt.ItemDataRole.UserRole, str(fpath))
+        name_item.setData(Qt.ItemDataRole.UserRole, ("image", str(fpath)))
+        if bg:
+            name_item.setBackground(QBrush(QColor(bg)))
         table.setItem(row, 2, name_item)
-
-        def _ren_w(p=fpath):
-            w = QWidget(); hl = QHBoxLayout(w); hl.setContentsMargins(3, 3, 3, 3)
-            hl.addWidget(self._action_btn("Rename", lambda _c=False, fp=p: self._rename_lib_image(fp)))
-            return w
-        table.setCellWidget(row, 3, _ren_w())
-
-        def _spw_w(p=str(fpath)):
-            w = QWidget(); hl = QHBoxLayout(w); hl.setContentsMargins(3, 3, 3, 3)
-            hl.addWidget(self._action_btn("Spawn", lambda _c=False, path=p: self.spawn_requested.emit(path)))
-            return w
-        table.setCellWidget(row, 4, _spw_w())
-
-        table.setCellWidget(row, 5, self._make_delete_btn_widget(
-            lambda _c=False, p=fpath: self._delete_lib_image(p)
-        ))
 
     def _populate_library_tab(self) -> None:
         table = self._lib_table
@@ -2537,66 +2672,113 @@ class ImageLibraryDialog(QDialog):
     # Actions
     # ------------------------------------------------------------------
 
-    def _rename_lib_image(self, path: Path) -> None:
-        from PyQt6.QtWidgets import QInputDialog
-        new_stem, ok = QInputDialog.getText(
-            self, "Rename Image", "New filename (without extension):",
-            text=path.stem,
-        )
-        if not ok or not new_stem.strip():
-            return
-        new_path = path.parent / (new_stem.strip() + path.suffix)
-        if new_path == path:
-            return
-        if new_path.exists():
-            QMessageBox.warning(self, "Rename", f"'{new_path.name}' already exists.")
-            return
-        try:
-            path.rename(new_path)
-        except Exception as e:
-            QMessageBox.warning(self, "Rename Failed", str(e))
-            return
-        self.rename_requested.emit(str(path), str(new_path))
-        self.refresh()
-
-    def _delete_lib_image(self, path: Path) -> None:
-        in_use = [it for it in self._items_ref if it._image_path == str(path)]
-        if in_use:
-            msg = (
-                f"'{path.name}' is used by {len(in_use)} canvas item(s).\n"
-                f"Deleting it will remove those items from the canvas.\n\n"
-                f"This cannot be undone. Continue?"
-            )
-        else:
-            msg = f"Delete '{path.name}' from the library?\n\nThis cannot be undone."
-        reply = QMessageBox.question(
-            self, "Delete Image",
-            msg,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-        try:
-            path.unlink(missing_ok=True)
-        except Exception as e:
-            QMessageBox.warning(self, "Delete Failed", str(e))
-            return
-        self.delete_from_library_requested.emit(str(path))
-        self.refresh()
-
     def _on_image_check(self, path: str, checked: bool) -> None:
         if checked:
             self._checked_images.add(path)
         else:
             self._checked_images.discard(path)
 
-    def _toggle_folder(self, name: str) -> None:
-        if name in self._expanded_folders:
-            self._expanded_folders.discard(name)
+    def _on_lib_double_click(self, row: int, col: int) -> None:
+        name_item = self._lib_table.item(row, 2)
+        if not name_item:
+            return
+        data = name_item.data(Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+        if data[0] == "folder":
+            self._toggle_folder_anim(data[1])
         else:
+            self.spawn_requested.emit(data[1])
+
+    def _on_lib_context_menu(self, pos) -> None:
+        row = self._lib_table.rowAt(pos.y())
+        if row < 0:
+            return
+        name_item = self._lib_table.item(row, 2)
+        if not name_item:
+            return
+        data = name_item.data(Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+        menu = QMenu(self)
+        if data[0] == "folder":
+            folder = Path(data[2])
+            menu.addAction("Rename", lambda: self._rename_lib_folder(folder))
+            menu.addAction("Delete", lambda: self._delete_lib_folder(folder))
+        else:
+            fpath = Path(data[1])
+            menu.addAction("Spawn", lambda: self.spawn_requested.emit(str(fpath)))
+            menu.addAction("Rename", lambda: self._rename_lib_image(fpath))
+            menu.addAction("Delete", lambda: self._delete_lib_image(fpath))
+        menu.exec(self._lib_table.viewport().mapToGlobal(pos))
+
+    def _toggle_folder_anim(self, name: str) -> None:
+        expanding = name not in self._expanded_folders
+        if expanding:
             self._expanded_folders.add(name)
-        self._populate_library_tab()
+        else:
+            self._expanded_folders.discard(name)
+        # Animate the arrow button for this folder row
+        for r in range(self._lib_table.rowCount()):
+            item = self._lib_table.item(r, 2)
+            if item:
+                d = item.data(Qt.ItemDataRole.UserRole)
+                if d and d[0] == "folder" and d[1] == name:
+                    btn = self._lib_table.cellWidget(r, 0)
+                    if isinstance(btn, RotatingArrowButton):
+                        btn.set_expanded(expanding, animated=True)
+                    break
+        QTimer.singleShot(160, self._populate_library_tab)
+
+    def _bulk_spawn_lib(self) -> None:
+        valid = sorted(p for p in self._checked_images if Path(p).exists())
+        if not valid:
+            QMessageBox.information(self, "Spawn", "No images are checked.")
+            return
+        for path_str in valid:
+            self.spawn_requested.emit(path_str)
+
+    def _bulk_delete_lib(self) -> None:
+        valid = sorted(p for p in self._checked_images if Path(p).exists())
+        if not valid:
+            QMessageBox.information(self, "Delete", "No images are checked.")
+            return
+        in_use_names = [
+            Path(p).name for p in valid
+            if any(it._image_path == p for it in self._items_ref)
+        ]
+        names_list = "\n".join(f"  \u2022 {Path(p).name}" for p in valid)
+        msg = f"Delete {len(valid)} image(s) from the library?\n\n{names_list}"
+        if in_use_names:
+            msg += (
+                f"\n\n{len(in_use_names)} image(s) are currently in use on the canvas. "
+                f"Canvas items will remain but may show a missing-image indicator."
+            )
+        msg += "\n\nThis cannot be undone."
+        reply = QMessageBox.question(
+            self, "Delete Images", msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        for path_str in valid:
+            p = Path(path_str)
+            try:
+                p.unlink(missing_ok=True)
+            except Exception:
+                continue
+            self._checked_images.discard(path_str)
+        self.refresh()
+
+    def _rename_checked_lib(self) -> None:
+        valid = [p for p in self._checked_images if Path(p).exists()]
+        if len(valid) != 1:
+            QMessageBox.information(
+                self, "Rename", "Check exactly one image to rename."
+            )
+            return
+        self._rename_lib_image(Path(valid[0]))
 
     def _new_folder(self) -> None:
         from PyQt6.QtWidgets import QInputDialog
@@ -2773,7 +2955,7 @@ class ImageLibraryDialog(QDialog):
         if in_use:
             msg = (
                 f"'{path.name}' is used by {len(in_use)} canvas item(s).\n"
-                f"Deleting it will remove those items from the canvas.\n\n"
+                f"Canvas items will remain but may show a missing-image indicator.\n\n"
                 f"This cannot be undone. Continue?"
             )
         else:
@@ -2791,14 +2973,61 @@ class ImageLibraryDialog(QDialog):
             QMessageBox.warning(self, "Delete Failed", str(e))
             return
         self._checked_images.discard(str(path))
-        self.delete_from_library_requested.emit(str(path))
         self.refresh()
 
-    def _localize_all_linked(self) -> None:
-        linked = [it for it in self._items_ref
+    def _on_scene_check(self, item, checked: bool) -> None:
+        if checked:
+            self._checked_scene.add(item)
+        else:
+            self._checked_scene.discard(item)
+
+    def _on_scene_double_click(self, row: int, col: int) -> None:
+        if 0 <= row < len(self._items_ref):
+            self.duplicate_requested.emit(self._items_ref[row])
+
+    def _on_scene_context_menu(self, pos) -> None:
+        row = self._scene_table.rowAt(pos.y())
+        if row < 0 or row >= len(self._items_ref):
+            return
+        item = self._items_ref[row]
+        menu = QMenu(self)
+        menu.addAction("Spawn", lambda: self.duplicate_requested.emit(item))
+        menu.addAction("Center", lambda: self.center_view_requested.emit(item))
+        localized = self._is_localized(item._image_path)
+        loc_act = menu.addAction("Localize", lambda: self.localize_requested.emit([item]))
+        loc_act.setEnabled(not localized)
+        menu.exec(self._scene_table.viewport().mapToGlobal(pos))
+
+    def _remove_checked_scene(self) -> None:
+        if not self._checked_scene:
+            QMessageBox.information(self, "Remove", "No items are checked.")
+            return
+        self.remove_from_scene_requested.emit(list(self._checked_scene))
+
+    def _spawn_checked_scene(self) -> None:
+        if not self._checked_scene:
+            QMessageBox.information(self, "Spawn", "No items are checked.")
+            return
+        for item in list(self._checked_scene):
+            self.duplicate_requested.emit(item)
+
+    def _localize_checked_scene(self) -> None:
+        linked = [it for it in self._checked_scene
                   if not self._is_localized(it._image_path)]
-        if linked:
-            self.localize_requested.emit(linked)
+        if not linked:
+            QMessageBox.information(self, "Localize", "No checked linked images to localize.")
+            return
+        names = "\n".join(f"  \u2022 {Path(it._image_path).name}" for it in linked)
+        reply = QMessageBox.question(
+            self, "Localize Images",
+            f"Copy {len(linked)} image(s) to the local Images folder?\n\n{names}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self.localize_requested.emit(linked)
+        self.refresh()
 
     def _open_images_folder(self) -> None:
         import subprocess, sys as _sys
@@ -2809,3 +3038,67 @@ class ImageLibraryDialog(QDialog):
             subprocess.Popen(['open', str(self._images_dir)])
         else:
             subprocess.Popen(['xdg-open', str(self._images_dir)])
+
+
+# ---------------------------------------------------------------------------
+# MeasurementSettingsDialog
+# ---------------------------------------------------------------------------
+
+class MeasurementSettingsDialog(QDialog):
+    """Configure cell size, unit label, and cone angle for measurements."""
+
+    def __init__(self, settings, parent=None):
+        super().__init__(parent)
+        self._settings = settings
+        self.setWindowTitle("Measurement Settings")
+        self.setModal(True)
+        self.setFixedWidth(320)
+        self.setStyleSheet(_DIALOG_STYLE)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 12)
+        layout.setSpacing(10)
+
+        form = QFormLayout()
+        form.setSpacing(8)
+
+        # Cell value
+        self._cell_val = QSpinBox()
+        self._cell_val.setRange(1, 9999)
+        self._cell_val.setValue(int(settings.measurement("cell_value")))
+        form.addRow("Cell value:", self._cell_val)
+
+        # Cell unit
+        self._cell_unit = QLineEdit(str(settings.measurement("cell_unit")))
+        self._cell_unit.setMaxLength(16)
+        form.addRow("Unit label:", self._cell_unit)
+
+        # Cone angle
+        self._cone_angle = QSpinBox()
+        self._cone_angle.setRange(1, 180)
+        self._cone_angle.setSuffix("°")
+        self._cone_angle.setValue(int(settings.measurement("cone_angle")))
+        form.addRow("Cone angle:", self._cone_angle)
+
+        layout.addLayout(form)
+        layout.addSpacing(4)
+
+        info = QLabel("Cell value and unit define the measurement scale.\nCone angle sets the full width of cone measurements.")
+        info.setStyleSheet("color: #8C8D9B; font-size: 11px;")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        layout.addSpacing(8)
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(self._save_and_accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def _save_and_accept(self) -> None:
+        self._settings.set_measurement("cell_value",  self._cell_val.value())
+        self._settings.set_measurement("cell_unit",   self._cell_unit.text().strip() or "ft")
+        self._settings.set_measurement("cone_angle",  self._cone_angle.value())
+        self._settings.save()
+        self.accept()

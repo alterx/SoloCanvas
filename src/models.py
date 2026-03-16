@@ -33,6 +33,7 @@ class CardData:
     image_path: str   # absolute path to front image
     back_path: str    # absolute path to back image
     name: str         # display name (stem of filename)
+    reversed: bool = False  # drawn reversed (rotated 180°) from deck reversal
 
     def to_dict(self) -> dict:
         return {
@@ -41,11 +42,19 @@ class CardData:
             "image_path": self.image_path,
             "back_path": self.back_path,
             "name": self.name,
+            "reversed": self.reversed,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "CardData":
-        return cls(**d)
+        return cls(
+            id=d["id"],
+            deck_id=d["deck_id"],
+            image_path=d["image_path"],
+            back_path=d["back_path"],
+            name=d["name"],
+            reversed=d.get("reversed", False),
+        )
 
 
 class DeckModel:
@@ -66,6 +75,8 @@ class DeckModel:
         self.all_cards: List[CardData] = []
         # cards: the pile (subset of all_cards that are still in the deck)
         self.cards: List[CardData] = []
+        # IDs of cards explicitly deleted by the user (not just drawn)
+        self.deleted_card_ids: set = set()
 
         if folder_path:
             self._load_cards()
@@ -158,6 +169,7 @@ class DeckModel:
             "back_path": self.back_path,
             "all_cards": [c.to_dict() for c in self.all_cards],
             "card_order": [c.image_path for c in self.cards],
+            "deleted_card_ids": list(self.deleted_card_ids),
         }
 
     @classmethod
@@ -180,4 +192,5 @@ class DeckModel:
         deck.cards = [
             path_lookup[p] for p in d.get("card_order", []) if p in path_lookup
         ]
+        deck.deleted_card_ids = set(d.get("deleted_card_ids", []))
         return deck

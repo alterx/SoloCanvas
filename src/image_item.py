@@ -81,6 +81,10 @@ class ImageItem(QGraphicsObject):
         self._orig_w_cells: float = self._w_cells
         self._orig_h_cells: float = self._h_cells
 
+        # Pre-scaled pixmap at display resolution — avoids per-frame scaling in paint()
+        self._display_pixmap: QPixmap = QPixmap()
+        self._build_display_pixmap()
+
         # Resize drag state
         self._resize_mode: bool       = False
         self._resizing: bool          = False
@@ -104,6 +108,22 @@ class ImageItem(QGraphicsObject):
         self._shadow.setOffset(4, 6)
         self._shadow.setColor(QColor(0, 0, 0, 160))
         self.setGraphicsEffect(self._shadow)
+
+    def _build_display_pixmap(self) -> None:
+        """Pre-scale source pixmap to display resolution so paint() never scales."""
+        if self._pixmap.isNull():
+            self._display_pixmap = self._pixmap
+            return
+        w = max(1, round(self._w_cells * self.grid_size))
+        h = max(1, round(self._h_cells * self.grid_size))
+        if self._pixmap.width() == w and self._pixmap.height() == h:
+            self._display_pixmap = self._pixmap
+        else:
+            self._display_pixmap = self._pixmap.scaled(
+                w, h,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
 
     def _compute_aspect_ratio(self) -> float:
         if not self._pixmap.isNull() and self._pixmap.height() > 0:
@@ -130,9 +150,8 @@ class ImageItem(QGraphicsObject):
     def paint(self, painter: QPainter, option, widget) -> None:
         rect = self.boundingRect()
 
-        if self._pixmap and not self._pixmap.isNull():
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-            painter.drawPixmap(rect.toRect(), self._pixmap)
+        if not self._display_pixmap.isNull():
+            painter.drawPixmap(rect.toRect(), self._display_pixmap)
         else:
             painter.fillRect(rect, QColor(70, 70, 70, 200))
             painter.setPen(QColor(220, 100, 100))
@@ -222,6 +241,7 @@ class ImageItem(QGraphicsObject):
         self.prepareGeometryChange()
         self.grid_size = new_size
         self._update_transform_origin()
+        self._build_display_pixmap()
         self.update()
 
     def resize(self, w_cells: float, h_cells: float) -> None:
@@ -229,12 +249,14 @@ class ImageItem(QGraphicsObject):
         self._w_cells = max(0.25, w_cells)
         self._h_cells = max(0.25, h_cells)
         self._update_transform_origin()
+        self._build_display_pixmap()
         self.update()
 
     def reload_image(self) -> None:
         """Reload pixmap from _image_path (called after localize)."""
         self._pixmap = QPixmap(self._image_path) if self._image_path else QPixmap()
         self._aspect_ratio = self._compute_aspect_ratio()
+        self._build_display_pixmap()
         self.update()
 
     # ------------------------------------------------------------------
@@ -271,6 +293,7 @@ class ImageItem(QGraphicsObject):
             self._w_cells = new_w
             self._h_cells = max(0.25, new_h)
             self._update_transform_origin()
+            self._build_display_pixmap()
             self.update()
             event.accept()
             return
@@ -424,6 +447,7 @@ class ImageItem(QGraphicsObject):
         self._w_cells = self._orig_w_cells
         self._h_cells = self._orig_h_cells
         self._update_transform_origin()
+        self._build_display_pixmap()
         self.update()
 
     # ------------------------------------------------------------------

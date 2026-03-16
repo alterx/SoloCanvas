@@ -73,6 +73,10 @@ def main():
     app.setOrganizationName("SoloCanvas")
     app.setStyle("Fusion")
 
+    _ico = Path(__file__).parent / "resources" / "images" / "scrollcanvas.io.ico"
+    if _ico.exists():
+        app.setWindowIcon(QIcon(str(_ico)))
+
     window = MainWindow()
     window.show()
 
