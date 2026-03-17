@@ -2,7 +2,7 @@
 
 A freeform canvas tool built for solo tabletop RPG players. Place card decks, dice, and images on an infinite canvas, manage your hand, take notes, and save your sessions — all in one window.
 
-> **Platform:** Windows | **Language:** Python 3 + PyQt6 | **License:** GPL-3.0
+ **Language:** Python 3 + PyQt6 | **License:** GPL-3.0
 
 ---
 
