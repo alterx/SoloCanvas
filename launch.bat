@@ -6,36 +6,42 @@ echo  SoloCanvas - Launch Script
 echo ============================================================
 echo.
 
-:: Python executable (same environment used by build.bat)
-set PYTHON=C:\Users\popes\AppData\Local\Python\bin\python.exe
-set PIP=C:\Users\popes\AppData\Local\Python\bin\pip.exe
-set PYTHONW=C:\Users\popes\AppData\Local\Python\bin\pythonw.exe
+:: ── 1. Locate Python 3 ───────────────────────────────────────────
+set PYTHON=
+set PYTHONW=
+set PIP=
 
-:: ── 1. Check Python exists ───────────────────────────────────────
-if not exist "%PYTHON%" (
-    echo [ERROR] Python not found at:
-    echo         %PYTHON%
+for %%C in (python3.exe python.exe) do (
+    if not defined PYTHON (
+        for /f "delims=" %%P in ('where %%C 2^>nul') do (
+            if not defined PYTHON (
+                for /f "tokens=2 delims= " %%V in ('"%%P" --version 2^>^&1') do (
+                    for /f "tokens=1 delims=." %%M in ("%%V") do (
+                        if "%%M"=="3" set PYTHON=%%P
+                    )
+                )
+            )
+        )
+    )
+)
+
+if not defined PYTHON (
+    echo [ERROR] Python 3 not found on PATH.
     echo.
-    echo Please install Python 3.14 to that location and re-run.
+    echo Please install Python 3 from https://www.python.org/downloads/
+    echo Make sure to check "Add Python to PATH" during installation.
     pause
     exit /b 1
 )
 
-:: ── 2. Check Python version (must be 3.x) ────────────────────────
+:: Derive pip and pythonw from the same directory as python
+for /f "delims=" %%D in ("%PYTHON%") do set PYDIR=%%~dpD
+set PIP=%PYDIR%pip.exe
+set PYTHONW=%PYDIR%pythonw.exe
+
+:: ── 2. Show Python version ────────────────────────────────────────
 for /f "tokens=2 delims= " %%V in ('"%PYTHON%" --version 2^>^&1') do set PYVER=%%V
-echo Found Python %PYVER%
-
-:: Extract major.minor  (e.g. 3.14)
-for /f "tokens=1,2 delims=." %%A in ("%PYVER%") do (
-    set PY_MAJOR=%%A
-    set PY_MINOR=%%B
-)
-
-if "%PY_MAJOR%" NEQ "3" (
-    echo [ERROR] Python 3 is required. Found: %PYVER%
-    pause
-    exit /b 1
-)
+echo Found Python %PYVER%  (%PYTHON%)
 
 :: ── 3. Check / install required packages ────────────────────────
 echo Checking prerequisites...

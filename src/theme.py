@@ -29,7 +29,18 @@ Core UI Palette
 """
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 from PyQt6.QtGui import QColor
+
+
+def _res_path(rel: str) -> str:
+    """Resolve a project-relative resource path for both dev and frozen builds."""
+    base = (Path(sys.executable).parent
+            if getattr(sys, "frozen", False)
+            else Path(__file__).parent.parent)
+    return str(base / rel).replace("\\", "/")
 
 
 # ---------------------------------------------------------------------------
@@ -192,8 +203,9 @@ QCheckBox::indicator {
     height: 13px;
 }
 QCheckBox::indicator:checked {
-    background-color: #524E48;
+    background-color: #3B3C4F;
     border-color: #9E886C;
+    image: url(CHECKBOX_X_PATH);
 }
 QRadioButton { color: #FFFFFF; }
 QRadioButton::indicator {
@@ -300,6 +312,12 @@ QToolTip {
     font-size: 12px;
 }
 """
+
+
+def get_app_stylesheet() -> str:
+    """Return APP_STYLESHEET with the checkbox X icon path resolved."""
+    x_path = _res_path("resources/images/checkbox_x.svg")
+    return APP_STYLESHEET.replace("CHECKBOX_X_PATH", x_path)
 
 
 # ---------------------------------------------------------------------------

@@ -55,7 +55,8 @@ class DeckItem(QGraphicsObject):
     stack_requested        = pyqtSignal()        # request MainWindow to stack selected items
     before_draw            = pyqtSignal()        # fires before any card is removed from model
     duplicate_requested    = pyqtSignal(object)  # emits self
-    delete_requested       = pyqtSignal(object)  # emits self when "Delete" is chosen
+    delete_requested          = pyqtSignal(object)  # emits self when "Delete" is chosen
+    delete_selected_requested = pyqtSignal()        # delete all selected items
     open_recall_requested  = pyqtSignal()        # emits when "Recall" is chosen
 
     def __init__(self, deck_model, parent=None):
@@ -444,60 +445,83 @@ class DeckItem(QGraphicsObject):
         super().hoverLeaveEvent(event)
 
     def contextMenuEvent(self, event) -> None:
+        # Option A: right-clicking an unselected item clears the selection
+        if not self.isSelected():
+            self.scene().clearSelection()
+            self.setSelected(True)
+
         views = self.scene().views() if self.scene() else []
         parent = views[0] if views else None
         menu = QMenu(parent)
 
-        menu.addAction("Delete", lambda: self.delete_requested.emit(self))
-        menu.addAction("Recall", self.open_recall_requested.emit)
+        from .card_item import CardItem as _CI
+        sel_decks = [i for i in self.scene().selectedItems() if isinstance(i, DeckItem)]
+        sel_cards = [i for i in self.scene().selectedItems() if isinstance(i, _CI)]
+        multi = len(sel_decks) > 1
+
+        # Delete
+        del_label = f"Delete ({len(sel_decks)})" if multi else "Delete"
+        menu.addAction(del_label, self.delete_selected_requested.emit)
+        if not multi:
+            menu.addAction("Recall", self.open_recall_requested.emit)
         menu.addSeparator()
+
         # Flip
-        flip_label = "Flip (show front)" if not self.face_up else "Flip (show back)"
-        menu.addAction(flip_label, self.flip)
+        flip_label = f"Flip ({len(sel_decks)})" if multi else (
+            "Flip (show front)" if not self.face_up else "Flip (show back)"
+        )
+        menu.addAction(flip_label, lambda: [i.flip() for i in sel_decks])
         menu.addSeparator()
 
-        draw_menu = menu.addMenu("Draw to Hand")
-        for n in (1, 2, 3, 5, 7):
-            draw_menu.addAction(f"{n} card{'s' if n > 1 else ''}",
-                                lambda checked=False, c=n: self.draw_cards_to_hand(c))
+        # Draw / Search / Duplicate — single-deck only
+        if not multi:
+            draw_menu = menu.addMenu("Draw to Hand")
+            for n in (1, 2, 3, 5, 7):
+                draw_menu.addAction(f"{n} card{'s' if n > 1 else ''}",
+                                    lambda checked=False, c=n: self.draw_cards_to_hand(c))
+            draw_canvas_menu = menu.addMenu("Draw to Canvas")
+            for n in (1, 2, 3):
+                draw_canvas_menu.addAction(
+                    f"{n} card{'s' if n > 1 else ''}",
+                    lambda checked=False, c=n: self.draw_cards_to_canvas(c),
+                )
+            menu.addSeparator()
+            menu.addAction("Search Cards…", lambda: self.search_cards_requested.emit(self))
+            menu.addSeparator()
+            menu.addAction("Duplicate", lambda: self.duplicate_requested.emit(self))
+            menu.addSeparator()
 
-        draw_canvas_menu = menu.addMenu("Draw to Canvas")
-        for n in (1, 2, 3):
-            draw_canvas_menu.addAction(
-                f"{n} card{'s' if n > 1 else ''}",
-                lambda checked=False, c=n: self.draw_cards_to_canvas(c),
-            )
+        # Shuffle
+        shuffle_label = f"Shuffle ({len(sel_decks)})" if multi else "Shuffle"
+        menu.addAction(shuffle_label, lambda: [i.shuffle() for i in sel_decks])
+        if not multi:
+            menu.addAction("Spread", self._spread_horizontal_action)
+            reversal_label = "✓ Reversal" if self.reversal_enabled else "Reversal"
+            menu.addAction(reversal_label, self._toggle_reversal)
+        menu.addSeparator()
 
-        menu.addSeparator()
-        menu.addAction("Search Cards…", lambda: self.search_cards_requested.emit(self))
-        menu.addSeparator()
-        menu.addAction("Duplicate", lambda: self.duplicate_requested.emit(self))
-        menu.addSeparator()
-        menu.addAction("Shuffle", self.shuffle)
-        menu.addAction("Spread",  self._spread_horizontal_action)
-        reversal_label = "✓ Reversal" if self.reversal_enabled else "Reversal"
-        menu.addAction(reversal_label, self._toggle_reversal)
-        menu.addSeparator()
-        lock_label = "Unlock" if self.locked else "Lock"
-        menu.addAction(lock_label, self._toggle_lock)
+        # Lock — majority state when multi
+        majority_locked = sum(1 for i in sel_decks if i.locked) > len(sel_decks) / 2
+        lock_label = "✓ Lock" if majority_locked else "Lock"
+        def _toggle_lock_all():
+            target = not majority_locked
+            for i in sel_decks:
+                if i.locked != target:
+                    i._toggle_lock()
+        menu.addAction(lock_label, _toggle_lock_all if multi else self._toggle_lock)
         snap_label = "✓ Snap to Grid" if self.grid_snap else "Snap to Grid"
         menu.addAction(snap_label, self._toggle_snap)
         preview_label = "Preview: On" if self.hover_preview else "Preview: Off"
         menu.addAction(preview_label, lambda: self._toggle_hover_preview())
 
         # Stack selected items (when 2+ cards/stacks are selected)
-        if self.scene():
-            from .card_item import CardItem
-            sel_cards = [i for i in self.scene().selectedItems() if isinstance(i, CardItem)]
-            sel_decks = [i for i in self.scene().selectedItems() if isinstance(i, DeckItem)]
-            total_sel = len(sel_cards) + len(sel_decks)
-            if total_sel >= 2:
-                menu.addSeparator()
-                menu.addAction(f"Stack {total_sel} Selected Items",
-                               self.stack_requested.emit)
+        total_sel = len(sel_cards) + len(sel_decks)
+        if total_sel >= 2:
+            menu.addSeparator()
+            menu.addAction(f"Stack {total_sel} Selected Items", self.stack_requested.emit)
 
-        # Stack-only: disband back to parent decks
-        if self.is_stack:
+        # Stack-only: disband back to parent decks (single deck only)
+        if self.is_stack and not multi:
             menu.addSeparator()
             menu.addAction("Disband Stack to Decks",
                            lambda: self.recall_stack_requested.emit(self))

@@ -24,7 +24,8 @@ from PyQt6.QtCore import Qt, QEasingCurve, QPropertyAnimation, QSize, QTimer, py
 from PyQt6.QtGui import QBrush, QColor, QFont, QIcon, QKeySequence, QPainter, QPainterPath, QPixmap, QTransform
 from PyQt6.QtWidgets import (
     QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
-    QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView,
+    QDoubleSpinBox, QFileDialog, QFontComboBox, QFormLayout, QGroupBox,
+    QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton,
     QScrollArea, QSlider, QSizePolicy, QSpinBox, QSplitter, QStackedWidget,
     QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
@@ -234,9 +235,10 @@ QListWidget::item:hover:!selected { background: #252535; }
 # ==============================================================================
 
 class SettingsDialog(QDialog):
-    def __init__(self, settings, parent=None):
+    def __init__(self, settings, parent=None, sticky_notes=None, initial_tab=None):
         super().__init__(parent)
         self._settings = settings
+        self._sticky_notes = sticky_notes or []
         self.setWindowTitle("Settings")
         self.setMinimumSize(680, 500)
         self.setWindowModality(Qt.WindowModality.NonModal)
@@ -244,12 +246,16 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
 
-        tabs = QTabWidget()
-        tabs.addTab(self._make_hotkeys_tab(),  "Hotkeys")
-        tabs.addTab(self._make_canvas_tab(),   "Canvas")
-        tabs.addTab(self._make_display_tab(),  "Display")
-        tabs.addTab(self._make_system_tab(),   "System")
-        layout.addWidget(tabs)
+        self._tabs = QTabWidget()
+        self._tabs.addTab(self._make_hotkeys_tab(),  "Hotkeys")
+        self._tabs.addTab(self._make_canvas_tab(),   "Canvas")
+        self._tabs.addTab(self._make_display_tab(),  "Display")
+        self._tabs.addTab(self._make_system_tab(),   "System")
+        self._tabs.addTab(self._make_sticky_tab(),   "Sticky Notes")
+        layout.addWidget(self._tabs)
+
+        if initial_tab is not None:
+            self._tabs.setCurrentIndex(initial_tab)
 
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok |
@@ -262,6 +268,13 @@ class SettingsDialog(QDialog):
             self._restore_defaults
         )
         layout.addWidget(btns)
+
+    def select_tab(self, name: str) -> None:
+        """Switch to the tab with the given label name."""
+        for i in range(self._tabs.count()):
+            if self._tabs.tabText(i) == name:
+                self._tabs.setCurrentIndex(i)
+                return
 
     # ------------------------------------------------------------------
     # Hotkeys tab
@@ -509,6 +522,87 @@ class SettingsDialog(QDialog):
         return w
 
     # ------------------------------------------------------------------
+    # Sticky Notes tab
+    # ------------------------------------------------------------------
+
+    def _make_sticky_tab(self) -> QWidget:
+        w = QWidget()
+        form = QFormLayout(w)
+        form.setContentsMargins(16, 16, 16, 16)
+        form.setSpacing(10)
+
+        # Font family
+        self._sticky_font_combo = QFontComboBox()
+        self._sticky_font_combo.setCurrentFont(
+            QFont(self._settings.sticky("default_font_family"))
+        )
+        form.addRow("Default Font:", self._sticky_font_combo)
+
+        # Font size
+        self._sticky_font_size_spin = QSpinBox()
+        self._sticky_font_size_spin.setRange(6, 72)
+        self._sticky_font_size_spin.setValue(self._settings.sticky("default_font_size"))
+        form.addRow("Default Font Size:", self._sticky_font_size_spin)
+
+        # Font color
+        self._sticky_font_color = self._settings.sticky("default_font_color")
+        self._sticky_font_color_btn = QPushButton()
+        self._sticky_font_color_btn.setFixedSize(80, 28)
+        self._set_color_btn(self._sticky_font_color_btn, self._sticky_font_color)
+        self._sticky_font_color_btn.clicked.connect(self._pick_sticky_font_color)
+        form.addRow("Default Font Color:", self._sticky_font_color_btn)
+
+        # Note color
+        self._sticky_note_color = self._settings.sticky("default_note_color")
+        self._sticky_note_color_btn = QPushButton()
+        self._sticky_note_color_btn.setFixedSize(80, 28)
+        self._set_color_btn(self._sticky_note_color_btn, self._sticky_note_color)
+        self._sticky_note_color_btn.clicked.connect(self._pick_sticky_note_color)
+        form.addRow("Default Note Color:", self._sticky_note_color_btn)
+
+        # Apply to all existing notes
+        apply_btn = QPushButton("Apply to All Existing Notes")
+        apply_btn.clicked.connect(self._apply_sticky_to_all)
+        form.addRow("", apply_btn)
+
+        return w
+
+    @staticmethod
+    def _set_color_btn(btn: QPushButton, hex_color: str) -> None:
+        """Paint a color-swatch button to reflect the chosen color."""
+        c = QColor(hex_color)
+        text_c = "#000000" if (c.red() * 299 + c.green() * 587 + c.blue() * 114) / 1000 > 128 else "#ffffff"
+        btn.setStyleSheet(
+            f"QPushButton {{ background-color: {hex_color}; color: {text_c}; "
+            f"border: 1px solid #4B4D63; border-radius: 3px; }}"
+        )
+        btn.setText(hex_color.upper())
+
+    def _pick_sticky_font_color(self) -> None:
+        color = QColorDialog.getColor(QColor(self._sticky_font_color), self, "Font Color")
+        if color.isValid():
+            self._sticky_font_color = color.name()
+            self._set_color_btn(self._sticky_font_color_btn, self._sticky_font_color)
+
+    def _pick_sticky_note_color(self) -> None:
+        color = QColorDialog.getColor(QColor(self._sticky_note_color), self, "Note Color")
+        if color.isValid():
+            self._sticky_note_color = color.name()
+            self._set_color_btn(self._sticky_note_color_btn, self._sticky_note_color)
+
+    def _apply_sticky_to_all(self) -> None:
+        """Apply current sticky settings to all existing notes immediately."""
+        family = self._sticky_font_combo.currentFont().family()
+        size   = self._sticky_font_size_spin.value()
+        for note in self._sticky_notes:
+            note._font_family = family
+            note._font_size   = size
+            note._font_color  = self._sticky_font_color
+            note._note_color  = self._sticky_note_color
+            note._apply_editor_style()
+            note.update()
+
+    # ------------------------------------------------------------------
     # Save / restore
     # ------------------------------------------------------------------
 
@@ -543,6 +637,12 @@ class SettingsDialog(QDialog):
 
         # System
         self._settings.set_system("undo_stack_size", self._undo_stack_spin.value())
+
+        # Sticky Notes
+        self._settings.set_sticky("default_font_family", self._sticky_font_combo.currentFont().family())
+        self._settings.set_sticky("default_font_size",   self._sticky_font_size_spin.value())
+        self._settings.set_sticky("default_font_color",  self._sticky_font_color)
+        self._settings.set_sticky("default_note_color",  self._sticky_note_color)
 
         self._settings.save()
         self.accept()
@@ -3080,6 +3180,11 @@ class MeasurementSettingsDialog(QDialog):
         self._cone_angle.setValue(int(settings.measurement("cone_angle")))
         form.addRow("Cone angle:", self._cone_angle)
 
+        # Decimals
+        self._decimals = QCheckBox("Show decimals")
+        self._decimals.setChecked(bool(settings.measurement("decimals")))
+        form.addRow("", self._decimals)
+
         layout.addLayout(form)
         layout.addSpacing(4)
 
@@ -3100,5 +3205,6 @@ class MeasurementSettingsDialog(QDialog):
         self._settings.set_measurement("cell_value",  self._cell_val.value())
         self._settings.set_measurement("cell_unit",   self._cell_unit.text().strip() or "ft")
         self._settings.set_measurement("cone_angle",  self._cone_angle.value())
+        self._settings.set_measurement("decimals",    self._decimals.isChecked())
         self._settings.save()
         self.accept()

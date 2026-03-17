@@ -106,6 +106,7 @@ class SessionManager:
         image_items: list = None,         # list[ImageItem]
         measurement_items: list = None,   # list[MeasurementItem]
         drawing_items: list = None,       # list[DrawingStrokeItem | DrawingShapeItem]
+        sticky_notes: list = None,        # list[StickyNoteItem]
     ) -> Dict[str, Any]:
         from .card_item import CardItem
         from .deck_item import DeckItem
@@ -189,6 +190,13 @@ class SessionManager:
                 if di.scene() is not None:
                     drawings_data.append(di.to_dict())
 
+        # Sticky notes
+        sticky_data = []
+        if sticky_notes:
+            for sn in sticky_notes:
+                if sn.scene() is not None:
+                    sticky_data.append(sn.to_state_dict())
+
         # Global hover_preview state — same value on all items; default True
         hover_preview = True
         for item in canvas_scene.items():
@@ -211,5 +219,6 @@ class SessionManager:
             "images":        images_data,
             "measurements":  measurements_data,
             "drawings":      drawings_data,
+            "sticky_notes":  sticky_data,
             "hover_preview": hover_preview,
         }

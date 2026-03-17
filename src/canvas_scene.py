@@ -54,6 +54,8 @@ class GridLayer(QGraphicsItem):
         return QPainterPath()  # empty – never hit-tested by itemAt()
 
     def paint(self, painter: QPainter, option, widget) -> None:
+        if widget is not None and getattr(widget.parentWidget(), 'no_grid', False):
+            return
         if self._canvas_scene.grid_visible:
             self._canvas_scene._draw_grid(painter, option.exposedRect)
 
@@ -73,6 +75,8 @@ class CanvasScene(QGraphicsScene):
     hand_cards_dropped     = pyqtSignal(list, QPointF)   # multi-card:  list of dicts, scene pos
     # Emitted when an image file is dragged from Explorer onto the canvas
     external_image_dropped = pyqtSignal(str, QPointF)    # local file path, scene pos
+    # Emitted when Paste is chosen from the canvas context menu
+    paste_requested        = pyqtSignal(QPointF)         # scene position of right-click
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -243,10 +247,14 @@ class CanvasScene(QGraphicsScene):
     def contextMenuEvent(self, event) -> None:
         transform = self.views()[0].transform() if self.views() else QTransform()
         item = self.itemAt(event.scenePos(), transform)
+        # Disabled items (e.g. an inactive sticky-note proxy) are skipped by
+        # Qt's internal event delivery — walk up to the nearest enabled ancestor.
+        while item is not None and not item.isEnabled():
+            item = item.parentItem()
         if item is None or isinstance(item, GridLayer):
             self._show_canvas_menu(event)
         else:
-            super().contextMenuEvent(event)
+            item.contextMenuEvent(event)
 
     def _show_canvas_menu(self, event) -> None:
         views = self.views()
@@ -255,10 +263,13 @@ class CanvasScene(QGraphicsScene):
 
         if views:
             view = views[0]
-            menu.addAction("Reset Zoom",     lambda: view.reset_zoom())
-            menu.addAction("Center View",    lambda: view.center_on_origin())
+            menu.addAction("Reset Zoom",  lambda: view.reset_zoom())
+            menu.addAction("Center View", lambda: view.center_on_origin())
             menu.addSeparator()
 
+        scene_pos = event.scenePos()
+        menu.addAction("Paste", lambda: self.paste_requested.emit(scene_pos))
+        menu.addSeparator()
         menu.addAction("Customize Background…", self._open_bg_dialog)
         menu.addSeparator()
         grid_label = "Hide Grid" if self.grid_visible else "Show Grid"

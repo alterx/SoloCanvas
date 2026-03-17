@@ -23,7 +23,7 @@ from typing import Dict, List, Optional
 
 from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer
 from PyQt6.QtGui import (
-    QAction, QCloseEvent, QColor, QFont, QIcon,
+    QAction, QActionGroup, QCloseEvent, QColor, QFont, QIcon,
     QKeySequence, QPainter, QPen, QPixmap,
 )
 from PyQt6.QtWidgets import (
@@ -54,6 +54,8 @@ from .hand_widget    import HandWidget, _HAND_MARGIN_BOTTOM
 from .models         import CardData, DeckModel
 from .session_manager  import SessionManager
 from .settings_manager import SettingsManager
+from .minimap_dialog      import MiniMapDialog
+from .sticky_note_item    import StickyNoteItem
 from .notepad_dialog   import NotepadDialog
 from .pdf_viewer       import PDFViewerWindow
 from . import theme as _theme
@@ -184,6 +186,9 @@ class MainWindow(QMainWindow):
         self._image_cascade_col: int = 0
         self._image_cascade_row: int = 0
 
+        # Sticky notes
+        self._sticky_notes: List["StickyNoteItem"] = []
+
         # Clipboard for copy/paste (list of {"type": str, "state": dict})
         self._clipboard: list = []
         self._clipboard_time: float = 0.0        # when internal clipboard was last written
@@ -197,6 +202,7 @@ class MainWindow(QMainWindow):
         self._image_library_dlg = None
         self._notepad_dlg: Optional[NotepadDialog] = None
         self._pdf_dlg: Optional[PDFViewerWindow] = None
+        self._minimaps: dict[str, MiniMapDialog] = {}   # image_path → dialog
 
         # Undo / redo (snapshot-based, configurable max levels)
         self._undo_stack: list = []
@@ -229,7 +235,7 @@ class MainWindow(QMainWindow):
 
     def _setup_ui(self) -> None:
         # Theme applied after full init via _apply_theme()
-        self.setMinimumSize(800, 600)
+        self.setMinimumSize(400, 300)
 
         central = QWidget()
         central.setObjectName("central")
@@ -266,6 +272,9 @@ class MainWindow(QMainWindow):
         self._hotkey_hint_label = QLabel("Press K for hotkey reference")
         self._hotkey_hint_label.setStyleSheet("color: #585b70; margin-left: 6px;")
         self._status.addWidget(self._hotkey_hint_label)
+        self._selection_label = QLabel("")
+        self._selection_label.setStyleSheet("color: #8C8D9B; margin-left: 12px;")
+        self._status.addWidget(self._selection_label)
         self._zoom_label = QLabel("100 %")
         self._zoom_label.setStyleSheet("color: #a6adc8; margin-right: 8px;")
         self._status.addPermanentWidget(self._zoom_label)
@@ -274,6 +283,8 @@ class MainWindow(QMainWindow):
         self._scene.hand_card_dropped.connect(self._on_hand_card_dropped)
         self._scene.hand_cards_dropped.connect(self._on_hand_cards_dropped)
         self._scene.external_image_dropped.connect(self._on_external_image_dropped)
+        self._scene.paste_requested.connect(self._paste_clipboard)
+        self._scene.selectionChanged.connect(self._on_selection_changed)
         self._view.zoom_changed.connect(self._on_zoom_changed)
         self._view.key_action.connect(self._dispatch_key)
         self._view.key_release_action.connect(self._dispatch_key_release)
@@ -297,6 +308,7 @@ class MainWindow(QMainWindow):
         self._toolbar.dice_clicked.connect(self._open_dice_library)
         self._toolbar.log_clicked.connect(self._open_roll_log)
         self._toolbar.notepad_clicked.connect(self._open_notepad)
+        self._toolbar.sticky_clicked.connect(self._place_sticky_note)
         self._toolbar.pdf_clicked.connect(self._open_pdf_viewer)
         self._toolbar.tool_changed.connect(self._on_toolbar_tool_changed)
         self._toolbar.measure_mode_changed.connect(self._on_measure_mode_changed)
@@ -308,6 +320,7 @@ class MainWindow(QMainWindow):
         self._hand.hand_card_count_changed.connect(self._toolbar.set_hand_card_count)
 
         self._view.measurement_toggled.connect(self._on_measurement_toggled)
+        self._view.drawing_toggled.connect(self._on_drawing_toggled)
         self._view.measurement_press.connect(self._on_measurement_press)
         self._view.measurement_move.connect(self._on_measurement_move)
         self._view.measurement_release.connect(self._on_measurement_release)
@@ -421,6 +434,21 @@ class MainWindow(QMainWindow):
             )
             toolbar_menu.addAction(a)
 
+        # View — window stacking
+        view_menu = mb.addMenu("&View")
+        layer_group = QActionGroup(self)
+        layer_group.setExclusive(True)
+        self._act_on_top    = QAction("Keep Window on Top",    self, checkable=True)
+        self._act_on_bottom = QAction("Keep Window on Bottom", self, checkable=True)
+        self._act_normal    = QAction("Normal Window",         self, checkable=True)
+        self._act_normal.setChecked(True)
+        for a in (self._act_on_top, self._act_on_bottom, self._act_normal):
+            layer_group.addAction(a)
+            view_menu.addAction(a)
+        self._act_on_top.triggered.connect(lambda: self._set_window_layer("top"))
+        self._act_on_bottom.triggered.connect(lambda: self._set_window_layer("bottom"))
+        self._act_normal.triggered.connect(lambda: self._set_window_layer("normal"))
+
         # Help
         help_menu = mb.addMenu("&Help")
         act(help_menu, "Hotkey Reference…  (K)", self._open_hotkey_reference)
@@ -439,6 +467,21 @@ class MainWindow(QMainWindow):
         pass  # Key dispatch handled via canvas_view.key_action signal
 
     # ------------------------------------------------------------------
+    # Window layer (View menu)
+    # ------------------------------------------------------------------
+
+    def _set_window_layer(self, layer: str) -> None:
+        flags = self.windowFlags()
+        flags &= ~Qt.WindowType.WindowStaysOnTopHint
+        flags &= ~Qt.WindowType.WindowStaysOnBottomHint
+        if layer == "top":
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        elif layer == "bottom":
+            flags |= Qt.WindowType.WindowStaysOnBottomHint
+        self.setWindowFlags(flags)
+        self.show()
+
+    # ------------------------------------------------------------------
     # Key dispatch (from canvas_view)
     # ------------------------------------------------------------------
 
@@ -450,12 +493,12 @@ class MainWindow(QMainWindow):
         ]
 
         if key_str == "Escape":
-            if self._view.measurement_active:
-                self._cancel_active_measurement()
-                self._view._measuring = False
-            if self._view.drawing_active:
-                self._on_draw_cancel()
+            if self._any_tool_active():
+                self._escape_deactivate_tools()
+            else:
+                self._show_startup_dialog()
             return
+
 
         if key_str == s.hotkey("flip"):
             if selected_cards:
@@ -537,20 +580,20 @@ class MainWindow(QMainWindow):
             # Send hovered or selected items to the bottom of the Z stack
             from PyQt6.QtGui import QCursor
             targets = [i for i in self._scene.selectedItems()
-                       if isinstance(i, (CardItem, ImageItem))
+                       if isinstance(i, (CardItem, ImageItem, StickyNoteItem))
                        and not getattr(i, 'is_anchor', False)]
             if not targets:
                 vp_pos = self._view.mapFromGlobal(QCursor.pos())
                 scene_pos = self._view.mapToScene(vp_pos)
                 for it in self._scene.items(scene_pos):
-                    if isinstance(it, (CardItem, ImageItem)) and not getattr(it, 'is_anchor', False):
+                    if isinstance(it, (CardItem, ImageItem, StickyNoteItem)) and not getattr(it, 'is_anchor', False):
                         targets = [it]
                         break
             if targets:
                 self._push_undo()
             for item in targets:
                 others_z = [it.zValue() for it in self._scene.items()
-                            if isinstance(it, (CardItem, DeckItem, ImageItem, DieItem))
+                            if isinstance(it, (CardItem, DeckItem, ImageItem, DieItem, StickyNoteItem))
                             and not getattr(it, 'is_anchor', False)
                             and it is not item]
                 item._base_z = (min(others_z) - 1) if others_z else 0
@@ -667,6 +710,10 @@ class MainWindow(QMainWindow):
     def _rotate_held(self, direction: int) -> None:
         if self._view._held_item:
             item = self._view._held_item
+            # Proxy widgets (e.g. sticky note editor) → resolve to parent item
+            from PyQt6.QtWidgets import QGraphicsProxyWidget
+            if isinstance(item, QGraphicsProxyWidget) and item.parentItem():
+                item = item.parentItem()
             step = self._settings.display("rotation_step")
             if isinstance(item, (CardItem, ImageItem)):
                 if direction > 0:
@@ -674,6 +721,9 @@ class MainWindow(QMainWindow):
                 else:
                     item.rotate_ccw(step)
             elif isinstance(item, DeckItem):
+                delta = step * direction
+                item.setRotation((item.rotation() + delta) % 360)
+            elif isinstance(item, StickyNoteItem) and not item.locked:
                 delta = step * direction
                 item.setRotation((item.rotation() + delta) % 360)
 
@@ -764,6 +814,7 @@ class MainWindow(QMainWindow):
         di.before_draw.connect(self._push_undo)
         di.duplicate_requested.connect(self._on_deck_duplicate)
         di.delete_requested.connect(self._on_deck_delete)
+        di.delete_selected_requested.connect(self._delete_selected)
         di.open_recall_requested.connect(self._recall_dialog)
 
     # ------------------------------------------------------------------
@@ -841,6 +892,48 @@ class MainWindow(QMainWindow):
         self._pdf_dlg = dlg
         self._show_nonmodal(dlg)
 
+    # ------------------------------------------------------------------
+    # Mini map
+    # ------------------------------------------------------------------
+
+    def _on_minimap_requested(self, item: ImageItem) -> None:
+        path = item._image_path
+        dlg = self._minimaps.get(path)
+        if item.minimap:
+            # Toggle on — open (or raise if somehow already open)
+            if dlg and dlg.isVisible():
+                dlg.raise_()
+                dlg.activateWindow()
+            else:
+                self._open_minimap(item)
+        else:
+            # Toggle off — close
+            if dlg:
+                dlg.closed.disconnect()
+                dlg.close()
+                self._minimaps.pop(path, None)
+
+    def _open_minimap(self, item: ImageItem, geometry=None) -> None:
+        dlg = MiniMapDialog(self._scene, item, geometry=geometry, parent=self)
+        self._minimaps[item._image_path] = dlg
+        item.minimap = True
+
+        def _on_closed():
+            item.minimap = False
+            item.minimap_geo = None
+            self._minimaps.pop(item._image_path, None)
+
+        dlg.closed.connect(_on_closed)
+        dlg.show()
+
+    def _sync_minimap_geos(self) -> None:
+        """Snapshot current dialog geometries back onto their ImageItems before save."""
+        for path, dlg in self._minimaps.items():
+            for item in self._image_items:
+                if item._image_path == path and dlg.isVisible():
+                    item.minimap_geo = dlg.geometry_list()
+                    break
+
     def _on_dice_requested(self, dice_list: list) -> None:
         """dice_list is a list of (die_type, set_name) tuples."""
         for die_type, set_name in dice_list:
@@ -874,6 +967,7 @@ class MainWindow(QMainWindow):
 
     def _connect_die_item(self, di: DieItem) -> None:
         di.delete_requested.connect(self._on_die_delete)
+        di.delete_selected_requested.connect(self._delete_selected)
         di.duplicate_requested.connect(self._on_die_duplicate)
         di.rolled.connect(self._on_die_rolled)
 
@@ -961,6 +1055,8 @@ class MainWindow(QMainWindow):
             "dice": dice_entries,
             "total": total,
         })
+        if self._roll_log_dlg and self._roll_log_dlg.isVisible():
+            self._roll_log_dlg._refresh()
 
     def _open_roll_log(self) -> None:
         if self._roll_log_dlg and self._roll_log_dlg.isVisible():
@@ -1008,11 +1104,18 @@ class MainWindow(QMainWindow):
 
     def _connect_image_item(self, item: ImageItem) -> None:
         item.delete_requested.connect(self._on_image_delete)
+        item.delete_selected_requested.connect(self._delete_selected)
         item.duplicate_requested.connect(self._on_image_duplicate)
         item.resize_requested.connect(self._on_image_resize)
         item.localize_requested.connect(lambda img: self._localize_image_items([img]))
         item.image_hovered.connect(self._on_image_hovered)
         item.image_unhovered.connect(self._on_image_unhovered)
+        item.minimap_requested.connect(self._on_minimap_requested)
+        item.update_measure_settings(
+            self._settings.measurement("cell_value"),
+            self._settings.measurement("cell_unit"),
+            self._settings.measurement("decimals"),
+        )
 
     def _on_external_image_dropped(self, path: str, scene_pos) -> None:
         """Called when an image file is dropped from Explorer onto the canvas."""
@@ -1078,6 +1181,53 @@ class MainWindow(QMainWindow):
                                 aspect_ratio=item._aspect_ratio, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             item.resize(dlg.w_cells, dlg.h_cells)
+
+    # ------------------------------------------------------------------
+    # Sticky notes
+    # ------------------------------------------------------------------
+
+    def _place_sticky_note(self) -> None:
+        """Place a new sticky note at the canvas center using current defaults."""
+        grid_size = self._settings.canvas("grid_size")
+        center = self._view.mapToScene(self._view.viewport().rect().center())
+        item = StickyNoteItem(
+            w_cells=3.0, h_cells=3.0, grid_size=grid_size,
+            note_color  = self._settings.sticky("default_note_color"),
+            font_family = self._settings.sticky("default_font_family"),
+            font_size   = self._settings.sticky("default_font_size"),
+            font_color  = self._settings.sticky("default_font_color"),
+        )
+        item.grid_snap = self._settings.canvas("grid_snap")
+        item.setPos(center.x() - item._px_w() / 2, center.y() - item._px_h() / 2)
+        item.delete_requested.connect(self._on_sticky_delete)
+        item.resize_requested.connect(self._on_sticky_resize)
+        item.settings_requested.connect(self._open_sticky_settings)
+        item.copy_requested.connect(self._copy_selected)
+        item.paste_requested.connect(self._paste_clipboard)
+        item.delete_selected_requested.connect(self._delete_selected)
+        self._scene.addItem(item)
+        self._sticky_notes.append(item)
+
+    def _on_sticky_delete(self, item: "StickyNoteItem") -> None:
+        if item in self._sticky_notes:
+            self._sticky_notes.remove(item)
+        if item.scene():
+            self._scene.removeItem(item)
+
+    def _on_sticky_resize(self, item: "StickyNoteItem") -> None:
+        dlg = ImageResizeDialog(item._w_cells, item._h_cells,
+                                aspect_ratio=item._w_cells / max(item._h_cells, 0.01),
+                                parent=self)
+        dlg.setWindowTitle("Resize Sticky Note")
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            item.resize(dlg.w_cells, dlg.h_cells)
+
+    def _open_sticky_settings(self) -> None:
+        dlg = SettingsDialog(self._settings, self,
+                             sticky_notes=self._sticky_notes)
+        dlg.select_tab("Sticky Notes")
+        dlg.finished.connect(lambda result: self._on_settings_closed(result))
+        self._show_nonmodal(dlg)
 
     def _localize_images(self) -> None:
         """Localize selected ImageItems (or all if none selected)."""
@@ -1315,6 +1465,7 @@ class MainWindow(QMainWindow):
         item.stack_requested.connect(self._on_stack_requested)
         item.copy_requested.connect(self._copy_selected)
         item.delete_requested.connect(self._on_card_delete)
+        item.delete_selected_requested.connect(self._delete_selected)
         self._scene.addItem(item)
         self._canvas_cards[card_data.image_path] = item
         return item
@@ -1676,6 +1827,7 @@ class MainWindow(QMainWindow):
         self._canvas_cards.clear()
         self._die_items.clear()
         self._image_items.clear()
+        self._sticky_notes.clear()
         self._roll_log.clear()
         self._frozen_measurements.clear()
         self._cancel_active_measurement()
@@ -1704,6 +1856,7 @@ class MainWindow(QMainWindow):
         self._do_save(path, name=name.strip())
 
     def _do_save(self, path: Path, name: str = "") -> None:
+        self._sync_minimap_geos()
         state = SessionManager.build_state(
             self._view, self._scene, self._hand,
             self._deck_models, self._deck_items,
@@ -1712,6 +1865,7 @@ class MainWindow(QMainWindow):
             image_items=self._image_items,
             measurement_items=self._frozen_measurements,
             drawing_items=self._drawing_items,
+            sticky_notes=self._sticky_notes,
         )
         saved = self._session.save(state, path=path, name=name or path.stem)
         self._session_path = saved
@@ -1868,6 +2022,8 @@ class MainWindow(QMainWindow):
             if item.locked:
                 item.setFlag(item.GraphicsItemFlag.ItemIsMovable, False)
                 item.setFlag(item.GraphicsItemFlag.ItemIsSelectable, False)
+            item.measure_movement = img_dict.get("measure_movement", False)
+            item.minimap_geo = img_dict.get("minimap_geo", None)
             # Restore anchor state (must happen after addItem for scene to be set)
             self._connect_image_item(item)
             self._scene.addItem(item)
@@ -1876,6 +2032,8 @@ class MainWindow(QMainWindow):
                 item._shadow.setEnabled(False)
                 item.setFlag(item.GraphicsItemFlag.ItemIsSelectable, False)
             self._image_items.append(item)
+            if img_dict.get("minimap", False):
+                self._open_minimap(item, geometry=item.minimap_geo)
             if item._pixmap.isNull():
                 missing_items.append(item)
         if missing_items:
@@ -1922,6 +2080,24 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+        # Restore sticky notes
+        self._sticky_notes.clear()
+        for sd in data.get("sticky_notes", []):
+            try:
+                item = StickyNoteItem.from_state_dict(
+                    sd, grid_size=self._settings.canvas("grid_size")
+                )
+                item.delete_requested.connect(self._on_sticky_delete)
+                item.resize_requested.connect(self._on_sticky_resize)
+                item.settings_requested.connect(self._open_sticky_settings)
+                item.copy_requested.connect(self._copy_selected)
+                item.paste_requested.connect(self._paste_clipboard)
+                item.delete_selected_requested.connect(self._delete_selected)
+                self._scene.addItem(item)
+                self._sticky_notes.append(item)
+            except Exception:
+                pass
+
     # ------------------------------------------------------------------
     # Undo / redo
     # ------------------------------------------------------------------
@@ -1935,6 +2111,7 @@ class MainWindow(QMainWindow):
             die_items=self._die_items,
             image_items=self._image_items,
             drawing_items=self._drawing_items,
+            sticky_notes=self._sticky_notes,
         )
         self._undo_stack.append(state)
         if len(self._undo_stack) > self._settings.system("undo_stack_size"):
@@ -1954,6 +2131,7 @@ class MainWindow(QMainWindow):
             die_items=self._die_items,
             image_items=self._image_items,
             drawing_items=self._drawing_items,
+            sticky_notes=self._sticky_notes,
         )
         self._redo_stack.append(current)
         state = self._undo_stack.pop()
@@ -1971,6 +2149,7 @@ class MainWindow(QMainWindow):
             die_items=self._die_items,
             image_items=self._image_items,
             drawing_items=self._drawing_items,
+            sticky_notes=self._sticky_notes,
         )
         self._undo_stack.append(current)
         state = self._redo_stack.pop()
@@ -2024,14 +2203,17 @@ class MainWindow(QMainWindow):
                 deck_state["is_stack"]  = item.is_stack
                 deck_state["grid_snap"] = item.grid_snap
                 entries.append({"type": "deck", "state": deck_state})
+            elif isinstance(item, StickyNoteItem):
+                entries.append({"type": "sticky", "state": item.to_state_dict()})
         if entries:
             import time as _time
             self._clipboard = entries
             self._clipboard_time = _time.monotonic()
 
-    def _paste_clipboard(self) -> None:
+    def _paste_clipboard(self, scene_pos=None) -> None:
         """Paste whichever clipboard was modified most recently —
-        the internal canvas clipboard or the system image clipboard."""
+        the internal canvas clipboard or the system image clipboard.
+        scene_pos: optional QPointF; if None, uses current cursor position."""
         sys_has_image = not QApplication.clipboard().image().isNull()
         use_internal = (
             bool(self._clipboard)
@@ -2042,8 +2224,10 @@ class MainWindow(QMainWindow):
             return
         import uuid as _uuid
         from PyQt6.QtGui import QCursor
-        vp_pos = self._view.mapFromGlobal(QCursor.pos())
-        cursor_scene = self._view.mapToScene(vp_pos)
+        if scene_pos is None:
+            vp_pos = self._view.mapFromGlobal(QCursor.pos())
+            scene_pos = self._view.mapToScene(vp_pos)
+        cursor_scene = scene_pos
 
         # Compute centroid of original positions to offset from
         positions = [
@@ -2080,6 +2264,7 @@ class MainWindow(QMainWindow):
                     item.stack_requested.connect(self._on_stack_requested)
                     item.copy_requested.connect(self._copy_selected)
                     item.delete_requested.connect(self._on_card_delete)
+                    item.delete_selected_requested.connect(self._delete_selected)
                     item.setPos(QPointF(s["x"], s["y"]) + offset)
                     self._scene.addItem(item)
                     self._canvas_cards[cd.image_path] = item
@@ -2130,6 +2315,20 @@ class MainWindow(QMainWindow):
                 self._deck_items[new_dm.id]  = new_di
                 self._deck_models[new_dm.id] = new_dm
                 new_di.setSelected(True)
+            elif t == "sticky":
+                note = StickyNoteItem.from_state_dict(
+                    s, grid_size=self._settings.canvas("grid_size")
+                )
+                note.setPos(QPointF(s["x"], s["y"]) + offset)
+                note.delete_requested.connect(self._on_sticky_delete)
+                note.resize_requested.connect(self._on_sticky_resize)
+                note.settings_requested.connect(self._open_sticky_settings)
+                note.copy_requested.connect(self._copy_selected)
+                note.paste_requested.connect(self._paste_clipboard)
+                note.delete_selected_requested.connect(self._delete_selected)
+                self._scene.addItem(note)
+                self._sticky_notes.append(note)
+                note.setSelected(True)
 
     def _paste_system_image(self) -> None:
         """Paste an image from the system clipboard as a new ImageItem.
@@ -2196,6 +2395,10 @@ class MainWindow(QMainWindow):
                 if item in self._frozen_measurements:
                     self._frozen_measurements.remove(item)
                 self._scene.removeItem(item)
+            elif isinstance(item, StickyNoteItem):
+                if item in self._sticky_notes:
+                    self._sticky_notes.remove(item)
+                self._scene.removeItem(item)
 
     # ------------------------------------------------------------------
     # Canvas actions
@@ -2221,7 +2424,8 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _open_settings(self) -> None:
-        dlg = SettingsDialog(self._settings, self)
+        dlg = SettingsDialog(self._settings, self,
+                             sticky_notes=self._sticky_notes)
         dlg.finished.connect(lambda result: self._on_settings_closed(result))
         self._show_nonmodal(dlg)
 
@@ -2247,7 +2451,7 @@ class MainWindow(QMainWindow):
 
     def _apply_theme(self) -> None:
         """Apply the static UI palette application-wide."""
-        QApplication.instance().setStyleSheet(_theme.APP_STYLESHEET)
+        QApplication.instance().setStyleSheet(_theme.get_app_stylesheet())
         self._zoom_label.setStyleSheet("color: #8C8D9B; margin-right: 8px;")
         self._hotkey_hint_label.setStyleSheet("color: #8C8D9B; margin-left: 6px;")
 
@@ -2258,21 +2462,32 @@ class MainWindow(QMainWindow):
     def _on_zoom_changed(self, scale: float) -> None:
         self._zoom_label.setText(f"{int(scale * 100)} %")
 
+    def _on_selection_changed(self) -> None:
+        count = len(self._scene.selectedItems())
+        self._selection_label.setText(f"{count} selected" if count > 0 else "")
+
     # ------------------------------------------------------------------
     # Window state & geometry
     # ------------------------------------------------------------------
 
     def _show_startup_dialog(self) -> None:
         sessions = self._session.list_sessions()
-        if not sessions:
-            return
         dlg = StartupDialog(sessions, self)
-        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.selected_path:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        # Save current session before switching away (if it has a known path)
+        if self._session_path:
+            self._do_save(self._session_path)
+        if dlg.selected_path:
+            # Load chosen session
             data = self._session.load(dlg.selected_path)
             if data:
                 self._load_state(data)
                 self._session_path = Path(dlg.selected_path)
                 self.setWindowTitle(f"SoloCanvas – {self._session_path.stem}")
+        else:
+            # New Session — current session already saved above; start fresh
+            self._clear_session()
 
     def _restore_window_state(self) -> None:
         from PyQt6.QtCore import QSettings as QS
@@ -2341,6 +2556,19 @@ class MainWindow(QMainWindow):
             self._view.unsetCursor()
             self._cancel_active_measurement()
 
+    def _on_drawing_toggled(self, active: bool) -> None:
+        if active:
+            self._cancel_active_measurement()
+            self._view.measurement_active = False
+            self._toolbar.set_active_tool("draw")
+            self._view.setCursor(Qt.CursorShape.CrossCursor)
+            self._open_draw_settings()
+        else:
+            self._finalize_active_draw()
+            self._close_draw_settings()
+            self._toolbar.set_active_tool("pointer")
+            self._view.unsetCursor()
+
     def _on_toolbar_tool_changed(self, tool: str) -> None:
         """Toolbar Pointer/Measure/Draw button clicked — sync view state."""
         self._view.measurement_active = (tool == "measure")
@@ -2397,6 +2625,7 @@ class MainWindow(QMainWindow):
             cell_value   = m.measurement("cell_value"),
             cell_unit    = m.measurement("cell_unit"),
             cone_angle   = m.measurement("cone_angle"),
+            decimals     = m.measurement("decimals"),
         )
         self._scene.addItem(item)
         self._active_measurement = item
@@ -2425,6 +2654,30 @@ class MainWindow(QMainWindow):
         item.delete_requested.connect(lambda i=item: self._remove_measurement(i))
         self._frozen_measurements.append(item)
         self._dim_bubble.hide()
+
+    def _any_tool_active(self) -> bool:
+        """Return True if any canvas tool (measure, draw, …) is currently active.
+        Add new tool flags here when future tools are introduced."""
+        return self._view.measurement_active or self._view.drawing_active
+
+    def _escape_deactivate_tools(self) -> None:
+        """Cancel any in-progress operation, clear non-persistent measurements,
+        and return to Pointer mode.  Add new tool teardown here for future tools."""
+        # Cancel in-progress operations
+        if self._view.measurement_active:
+            self._cancel_active_measurement()
+            self._view._measuring = False
+        if self._view.drawing_active:
+            self._on_draw_cancel()
+        # Clear non-persistent measurements
+        if not self._measure_persistent:
+            self._clear_all_measurements()
+        # Deactivate all tools → pointer
+        self._view.measurement_active = False
+        self._view.drawing_active = False
+        self._toolbar.set_active_tool("pointer")
+        self._view.unsetCursor()
+        self._close_draw_settings()
 
     def _cancel_active_measurement(self) -> None:
         if self._active_measurement is not None:
@@ -2700,6 +2953,16 @@ class MainWindow(QMainWindow):
         dlg = MeasurementSettingsDialog(self._settings, self)
         if dlg.exec():
             self._update_measure_menu_state()
+            self._refresh_measure_settings()
+
+    def _refresh_measure_settings(self) -> None:
+        """Push updated cell_value/cell_unit/decimals to all image items immediately."""
+        m = self._settings
+        cv  = m.measurement("cell_value")
+        cu  = m.measurement("cell_unit")
+        dec = m.measurement("decimals")
+        for item in self._image_items:
+            item.update_measure_settings(cv, cu, dec)
 
     # ------------------------------------------------------------------
     # About
@@ -2734,6 +2997,7 @@ class MainWindow(QMainWindow):
                     image_items=self._image_items,
                     measurement_items=self._frozen_measurements,
                     drawing_items=self._drawing_items,
+                    sticky_notes=self._sticky_notes,
                 )
                 if self._session_path is not None:
                     # Save to the active named session

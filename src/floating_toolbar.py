@@ -87,6 +87,7 @@ BUTTONS: List[tuple] = [
     ("notepad",  "fa5s.book-open",      "Notepad"),
     ("measure",  "fa5s.ruler-combined", "Measure"),
     ("draw",     "fa5s.pencil-alt",     "Draw"),
+    ("sticky",   "fa5s.sticky-note",    "Sticky Note"),
     ("pdf",      "fa5s.file-pdf",       "PDF Viewer"),
 ]
 _ALL_IDS = [b[0] for b in BUTTONS]
@@ -129,6 +130,7 @@ class FloatingToolbar(QWidget):
     dice_clicked    = pyqtSignal()
     log_clicked     = pyqtSignal()
     notepad_clicked = pyqtSignal()
+    sticky_clicked  = pyqtSignal()
     pdf_clicked     = pyqtSignal()
     measure_clicked = pyqtSignal()   # toggles measure mode on/off
 
@@ -147,6 +149,7 @@ class FloatingToolbar(QWidget):
         "dice":    "dice_clicked",
         "log":     "log_clicked",
         "notepad": "notepad_clicked",
+        "sticky":  "sticky_clicked",
         "pdf":     "pdf_clicked",
     }
 

@@ -41,7 +41,8 @@ class DieItem(QGraphicsObject):
     """
 
     # Signals
-    delete_requested    = pyqtSignal(object)        # self
+    delete_requested          = pyqtSignal(object)  # self
+    delete_selected_requested = pyqtSignal()        # delete all selected items
     duplicate_requested = pyqtSignal(object)        # self
     rolled              = pyqtSignal(object, int)   # self, final_value
 
@@ -473,15 +474,27 @@ class DieItem(QGraphicsObject):
         super().mouseDoubleClickEvent(event)
 
     def contextMenuEvent(self, event) -> None:
+        # Option A: right-clicking an unselected item clears the selection
+        if not self.isSelected():
+            self.scene().clearSelection()
+            self.setSelected(True)
+
         views = self.scene().views() if self.scene() else []
         parent = views[0] if views else None
         menu = QMenu(parent)
 
-        menu.addAction("Roll",  self.roll)
-        menu.addAction("Reset", self.reset_value)
+        sel_dice = [i for i in self.scene().selectedItems() if isinstance(i, DieItem)]
+        multi = len(sel_dice) > 1
+
+        roll_label = f"Roll ({len(sel_dice)})" if multi else "Roll"
+        menu.addAction(roll_label, lambda: [i.roll() for i in sel_dice])
+        if not multi:
+            menu.addAction("Reset", self.reset_value)
         menu.addSeparator()
-        menu.addAction("Duplicate", lambda: self.duplicate_requested.emit(self))
-        menu.addAction("Delete",    lambda: self.delete_requested.emit(self))
+        if not multi:
+            menu.addAction("Duplicate", lambda: self.duplicate_requested.emit(self))
+        del_label = f"Delete ({len(sel_dice)})" if multi else "Delete"
+        menu.addAction(del_label, self.delete_selected_requested.emit)
         menu.addSeparator()
         snap_label    = "✓ Snap to Grid" if self.grid_snap    else "Snap to Grid"
         preview_label = "Preview: On"    if self.hover_preview else "Preview: Off"

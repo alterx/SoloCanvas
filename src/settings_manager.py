@@ -161,12 +161,20 @@ DEFAULT_PDF: Dict[str, Any] = {
     "window_geometry":  None,           # [x, y, w, h] or None
 }
 
+DEFAULT_STICKY: Dict[str, Any] = {
+    "default_font_family": "Arial",
+    "default_font_size":   12,
+    "default_font_color":  "#ffffff",
+    "default_note_color":  "#1f1f2c",
+}
+
 DEFAULT_MEASUREMENT: Dict[str, Any] = {
     "cell_value":    5,        # numeric value per grid cell (e.g. 5)
     "cell_unit":     "ft",     # unit label (e.g. "ft", "m")
     "cone_angle":    53,       # cone full angle in degrees
     "mode":          "grid",   # "grid" | "free"
     "measure_type":  "line",   # "line" | "area" | "cone"
+    "decimals":      False,    # show one decimal place in distance labels
 }
 
 
@@ -189,6 +197,7 @@ class SettingsManager:
             "drawing":     dict(DEFAULT_DRAWING),
             "system":      dict(DEFAULT_SYSTEM),
             "pdf":         dict(DEFAULT_PDF),
+            "sticky":      dict(DEFAULT_STICKY),
             "toolbar": {
                 "button_order":      list(DEFAULT_TOOLBAR["button_order"]),
                 "button_visibility": dict(DEFAULT_TOOLBAR["button_visibility"]),
@@ -208,7 +217,7 @@ class SettingsManager:
             with open(self._path, "r", encoding="utf-8") as f:
                 saved = json.load(f)
             # Deep-merge: keep defaults for any missing keys
-            for section in ("hotkeys", "canvas", "display", "measurement", "drawing", "system", "pdf"):
+            for section in ("hotkeys", "canvas", "display", "measurement", "drawing", "system", "pdf", "sticky"):
                 if section in saved:
                     self._data[section].update(saved[section])
             if "toolbar" in saved:
@@ -360,6 +369,12 @@ class SettingsManager:
         d.mkdir(parents=True, exist_ok=True)
         (d / "Images").mkdir(parents=True, exist_ok=True)
         return d
+
+    def sticky(self, key: str) -> Any:
+        return self._data["sticky"].get(key, DEFAULT_STICKY.get(key))
+
+    def set_sticky(self, key: str, value: Any) -> None:
+        self._data["sticky"][key] = value
 
     def notepad_config_path(self) -> Path:
         """Path to notepad.json in %APPDATA%/SoloCanvas/."""

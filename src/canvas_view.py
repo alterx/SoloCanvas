@@ -59,6 +59,8 @@ class CanvasView(QGraphicsView):
     measurement_release  = pyqtSignal(QPointF) # scene pos on left-release
     measurement_waypoint = pyqtSignal()        # Space pressed while measuring (line waypoint)
 
+    drawing_toggled = pyqtSignal(bool)   # True = active, False = inactive (P key toggle)
+
     # Drawing signals (emitted only when drawing_active is True)
     draw_press    = pyqtSignal(QPointF)  # scene pos on left-press
     draw_move     = pyqtSignal(QPointF)  # scene pos on mouse-move
@@ -388,12 +390,30 @@ class CanvasView(QGraphicsView):
     # ------------------------------------------------------------------
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
+        # If a proxy widget (e.g. sticky note editor) holds scene focus,
+        # route the key to it without any canvas key processing.
+        from PyQt6.QtWidgets import QGraphicsProxyWidget
+        scene = self.scene()
+        if scene and isinstance(scene.focusItem(), QGraphicsProxyWidget):
+            super().keyPressEvent(event)
+            return
+
         # Space during active line measurement → place waypoint
         if (event.key() == Qt.Key.Key_Space and not event.isAutoRepeat()
                 and self.measurement_active and self._measuring):
             self.measurement_waypoint.emit()
             event.accept()
             return
+
+        # Space during move-measure drag → place movement waypoint
+        if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
+            grabber = self.scene().mouseGrabberItem() if self.scene() else None
+            if (grabber is not None
+                    and getattr(grabber, 'measure_movement', False)
+                    and getattr(grabber, '_mm_dragging', False)):
+                grabber.add_move_waypoint()
+                event.accept()
+                return
 
         # Space → temporary pan
         if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
@@ -408,6 +428,15 @@ class CanvasView(QGraphicsView):
             if not self.measurement_active:
                 self._measuring = False
             self.measurement_toggled.emit(self.measurement_active)
+            event.accept()
+            return
+
+        # P key → toggle drawing mode
+        if event.key() == Qt.Key.Key_P and not event.isAutoRepeat():
+            self.drawing_active = not self.drawing_active
+            if not self.drawing_active:
+                self._is_drawing = False
+            self.drawing_toggled.emit(self.drawing_active)
             event.accept()
             return
 

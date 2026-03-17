@@ -53,7 +53,8 @@ class CardItem(QGraphicsObject):
     card_unhovered   = pyqtSignal()
     stack_requested  = pyqtSignal()        # emitted when "Stack Selected" is chosen
     copy_requested   = pyqtSignal()        # emitted when "Copy" is chosen
-    delete_requested = pyqtSignal(object)  # emits self when "Delete" is chosen
+    delete_requested          = pyqtSignal(object)  # emits self when "Delete" is chosen
+    delete_selected_requested = pyqtSignal()        # delete all selected items
 
     def __init__(self, card_data, face_up: bool = True, parent=None):
         super().__init__(parent)
@@ -341,36 +342,57 @@ class CardItem(QGraphicsObject):
         super().mouseReleaseEvent(event)
 
     def contextMenuEvent(self, event) -> None:
+        # Option A: right-clicking an unselected item clears the selection
+        if not self.isSelected():
+            self.scene().clearSelection()
+            self.setSelected(True)
+
         views = self.scene().views() if self.scene() else []
         parent = views[0] if views else None
         menu = QMenu(parent)
 
-        menu.addAction("Copy",           self.copy_requested.emit)
-        menu.addAction("Delete",         lambda: self.delete_requested.emit(self))
+        from .deck_item import DeckItem as _DI
+        sel_cards = [i for i in self.scene().selectedItems() if isinstance(i, CardItem)]
+        sel_decks = [i for i in self.scene().selectedItems() if isinstance(i, _DI)]
+        multi = len(sel_cards) > 1
+
+        # Copy / Delete
+        menu.addAction("Copy", self.copy_requested.emit)
+        del_label = f"Delete ({len(sel_cards)})" if multi else "Delete"
+        menu.addAction(del_label, self.delete_selected_requested.emit)
         menu.addSeparator()
-        menu.addAction("Flip",           self.flip)
-        menu.addAction("Rotate CW",      self.rotate_cw)
-        menu.addAction("Rotate CCW",     self.rotate_ccw)
+
+        # Flip
+        flip_label = f"Flip ({len(sel_cards)})" if multi else "Flip"
+        menu.addAction(flip_label, lambda: [i.flip() for i in sel_cards])
+        # Rotate
+        cw_label  = f"Rotate CW ({len(sel_cards)})"  if multi else "Rotate CW"
+        ccw_label = f"Rotate CCW ({len(sel_cards)})" if multi else "Rotate CCW"
+        menu.addAction(cw_label,  lambda: [i.rotate_cw()  for i in sel_cards if not i.locked])
+        menu.addAction(ccw_label, lambda: [i.rotate_ccw() for i in sel_cards if not i.locked])
         menu.addSeparator()
-        menu.addAction("Send to Hand",   lambda: self.send_to_hand.emit(self.card_data))
-        menu.addAction("Return to Deck", lambda: self.return_to_deck.emit(self.card_data))
-        menu.addSeparator()
+
+        # Single-item only actions
+        if not multi:
+            menu.addAction("Send to Hand",   lambda: self.send_to_hand.emit(self.card_data))
+            menu.addAction("Return to Deck", lambda: self.return_to_deck.emit(self.card_data))
+            menu.addSeparator()
 
         # Stack option — visible when 2+ cards/stacks are selected
-        if self.scene():
-            from .deck_item import DeckItem as _DI
-            sel_cards = [i for i in self.scene().selectedItems() if isinstance(i, CardItem)]
-            sel_decks = [i for i in self.scene().selectedItems() if isinstance(i, _DI)]
-            total_sel = len(sel_cards) + len(sel_decks)
-            if total_sel >= 2:
-                menu.addAction(
-                    f"Stack {total_sel} Selected Items",
-                    self.stack_requested.emit,
-                )
-                menu.addSeparator()
+        total_sel = len(sel_cards) + len(sel_decks)
+        if total_sel >= 2:
+            menu.addAction(f"Stack {total_sel} Selected Items", self.stack_requested.emit)
+            menu.addSeparator()
 
-        lock_label = "Unlock" if self.locked else "Lock"
-        menu.addAction(lock_label, self._toggle_lock)
+        # Lock — majority state when multi
+        majority_locked = sum(1 for i in sel_cards if i.locked) > len(sel_cards) / 2
+        lock_label = "✓ Lock" if majority_locked else "Lock"
+        def _toggle_lock_all():
+            target = not majority_locked
+            for i in sel_cards:
+                if i.locked != target:
+                    i._toggle_lock()
+        menu.addAction(lock_label, _toggle_lock_all if multi else self._toggle_lock)
         snap_label = "✓ Snap to Grid" if self.grid_snap else "Snap to Grid"
         menu.addAction(snap_label, self._toggle_snap)
         preview_label = "Preview: On" if self.hover_preview else "Preview: Off"

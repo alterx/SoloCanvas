@@ -134,6 +134,7 @@ class MeasurementItem(QGraphicsObject):
         cell_value:   int,
         cell_unit:    str,
         cone_angle:   float,
+        decimals:     bool = False,
         parent=None,
     ):
         super().__init__(parent)
@@ -143,6 +144,7 @@ class MeasurementItem(QGraphicsObject):
         self._cell_value   = cell_value
         self._cell_unit    = cell_unit
         self._cone_angle   = float(cone_angle)
+        self._decimals     = decimals
         self._active       = True
 
         # Snap origin when in grid mode
@@ -207,7 +209,8 @@ class MeasurementItem(QGraphicsObject):
                 else:
                     total += math.hypot(seg_dx, seg_dy) / g
             dist = total * self._cell_value
-            return f"{dist:.0f} {self._cell_unit}"
+            fmt = ".1f" if self._decimals else ".0f"
+            return f"{dist:{fmt}} {self._cell_unit}"
 
         elif self._measure_type == "area":
             if self._mode == "grid":
@@ -217,7 +220,8 @@ class MeasurementItem(QGraphicsObject):
             else:
                 radius_cells = math.hypot(dx, dy) / g
             radius = radius_cells * self._cell_value
-            return f"{radius:.0f} {self._cell_unit} radius"
+            fmt = ".1f" if self._decimals else ".0f"
+            return f"{radius:{fmt}} {self._cell_unit} radius"
 
         else:  # cone
             dist_px = math.hypot(dx, dy)
@@ -226,7 +230,8 @@ class MeasurementItem(QGraphicsObject):
             else:
                 cells = dist_px / g
             length = cells * self._cell_value
-            return f"{length:.0f} {self._cell_unit} cone"
+            fmt = ".1f" if self._decimals else ".0f"
+            return f"{length:{fmt}} {self._cell_unit} cone"
 
     # ------------------------------------------------------------------
     # QGraphicsItem interface
@@ -500,6 +505,7 @@ class MeasurementItem(QGraphicsObject):
             "cell_value":   self._cell_value,
             "cell_unit":    self._cell_unit,
             "cone_angle":   self._cone_angle,
+            "decimals":     self._decimals,
             "origin":       [self._origin.x(), self._origin.y()],
             "waypoints":    [[p.x(), p.y()] for p in self._waypoints],
             "end":          [self._end.x(),    self._end.y()],
@@ -517,6 +523,7 @@ class MeasurementItem(QGraphicsObject):
             cell_value   = d["cell_value"],
             cell_unit    = d["cell_unit"],
             cone_angle   = d["cone_angle"],
+            decimals     = d.get("decimals", False),
         )
         item._end = QPointF(d["end"][0], d["end"][1])
         item._waypoints = [QPointF(p[0], p[1]) for p in d.get("waypoints", [])]
