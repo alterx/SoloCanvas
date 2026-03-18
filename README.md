@@ -1,60 +1,232 @@
 # SoloCanvas
 
-A freeform canvas tool built for solo tabletop RPG players. Place card decks, dice, and images on an infinite canvas, manage your hand, take notes, and save your sessions — all in one window.
+A freeform canvas tool built for solo tabletop RPG players. Place card decks, dice, sticky notes, and images on an infinite canvas, manage your hand, take notes, and save your sessions — all in one window.
 
- **Language:** Python 3 + PyQt6 | **License:** GPL-3.0
+**Language:** Python 3 + PyQt6 | **License:** GPL-3.0
 
 ---
 
-## Features
+<table>
+  <tr>
+    <td colspan="2"><img src="screenshots/Scrennshots_5.png" width="100%"></td>
+  </tr>
+  <tr>
+    <td><img src="screenshots/Scrennshots_1.png" width="100%"></td>
+    <td><img src="screenshots/Scrennshots_2.png" width="100%"></td>
+  </tr>
+  <tr>
+    <td><img src="screenshots/Scrennshots_3.png" width="100%"></td>
+    <td><img src="screenshots/Scrennshots_4.png" width="100%"></td>
+  </tr>
+</table>
 
-- **Infinite canvas** — zoom, pan, and arrange anything freely
-- **Card decks** — load image-based decks, draw to hand or canvas, flip, shuffle, search, and reorder
-- **Dice** — place physical dice on the canvas; roll with a keypress
-- **Image import** — drag in images, paste from clipboard, or import via the Image Library
-- **Hand strip** — a persistent card hand at the bottom of the window with drag-to-reorder and multi-select
-- **Notepad** — a WYSIWYG Markdown notepad with heading formatting and font controls
-- **Sessions** — save and load named sessions with canvas screenshots; autosave on close
-- **Canvas theming** — the entire UI derives its colour from the canvas background
+---
+
+## System Requirements
+
+- **OS:** Windows 10+, Linux (most distributions), macOS *(untested)*
+- **Python:** 3.9 or newer (source installs only)
+- **Standalone exe:** Windows 10+ only — no Python required
 
 ---
 
 ## Installation
 
+### Standalone (Windows)
 
-### Steps
+1. Download the latest release archive from the [Releases](../../releases) page
+2. Extract it anywhere on your drive
+3. Run **`SoloCanvas.exe`** — keep it in the same folder as your `Decks\`, `Dice\`, `Images\`, and `Notes\` folders
 
-1. **Download the 7z from releases**
+### From Source (Windows / Linux)
 
-   Unzip the file on your drive.
-
-2. **Run EXE**
-
-   Run the SoloCanvas.exe
-
-   Be sure to keep the .exe in the same folder as your /Deck /Dice /Images and /Notes folders.
+1. Clone or download the repository
+2. Run the appropriate launch script — it handles everything else automatically:
+   - **Windows:** double-click `launch.bat`
+   - **Linux:** run `./launch.sh` in a terminal
 
 ---
 
-## Launching
+## Launch Scripts
 
-### From source
+The launch scripts are designed to get SoloCanvas running with no manual setup. On first run they create an isolated Python virtual environment, install all required packages into it, and launch the app. Your system Python installation is never modified.
 
-```bash
-python main.py
-```
+### `launch.bat` (Windows)
 
-Or double-click **`launch.bat`** on Windows — it checks for dependencies, offers to install any that are missing, and launches the app without a terminal window.
+- Searches `PATH` for Python 3, skipping the Windows Store stub
+- Creates a `.venv\` folder in the SoloCanvas directory on first run
+- Checks for all required packages and offers to install any that are missing
+- Installs packages into the virtual environment only — not system-wide
+- Launches the app without a terminal window (`pythonw.exe`)
 
-### Standalone executable (Windows)
+### `launch.sh` (Linux)
 
-Run **`build.bat`** to produce a self-contained executable using PyInstaller:
+- Searches `PATH` for Python 3
+- Creates a `.venv/` folder in the SoloCanvas directory on first run
+- If `venv` or `pip` support is missing (common on Debian/Ubuntu), detects your package manager and offers to install the required system packages — with an explanation and confirmation prompt before requesting `sudo`
+- Supports: `apt` (Debian/Ubuntu), `dnf` (Fedora/RHEL), `pacman` (Arch), `zypper` (openSUSE)
+- Installs all Python packages into the virtual environment only
+- Pauses on exit so the terminal stays open until you're done
+
+### `build.bat` (Windows — developers only)
+
+Produces a self-contained standalone exe using PyInstaller:
 
 ```
 dist\SoloCanvas\SoloCanvas.exe
 ```
 
-The build script bundles all dependencies. Copy your `Decks\` folder next to the exe before running.
+- Searches `PATH` for Python 3 dynamically — no hardcoded paths
+- Installs PyInstaller if needed
+- Bundles all dependencies, fonts, icons, and resources
+- Copies `Dice\` and `resources\` next to the exe automatically
+- Creates empty `Decks\`, `Images\`, and `Notes\` folders in the output
+
+---
+
+## Features
+
+### Canvas
+
+- **Infinite canvas** — zoom, pan, and arrange anything freely with no boundaries
+- **Background theming** — the entire UI (toolbar, hand strip, dialogs) derives its colour from the canvas background colour
+- **Grid** — optional dot or line grid with configurable size and snap-to-grid
+- **Undo / Redo** — full undo history for canvas actions (`Ctrl+Z` / `Ctrl+Shift+Z`)
+- **Drawing tools** — freehand draw and shape tools (line, rectangle, ellipse) with configurable colour, width, and opacity
+- **Measurement tool** — drag to measure distances on the canvas with configurable scale and units
+- **Mini Map** — floating overview of the full canvas with click-to-navigate
+- **Magnify overlay** — hold `M` to magnify the card or image under the cursor
+- **Multi-select** — rubber-band select, `Ctrl+A`, or `Ctrl+click`; batch actions (flip, roll, rotate, delete, lock) apply to all eligible selected items with counts shown in context menus
+
+### Cards & Decks
+
+- **Deck Library** — load image-based decks from the `Decks\` folder; double-click to place on canvas
+- **Drawing cards** — hover over a deck and press a number key to draw to hand; `Shift`+number draws directly to the canvas
+- **Flip** — flip any card or deck face-up / face-down individually or in bulk
+- **Shuffle** — shuffle any deck or stack; animates with a shake
+- **Card Picker** — search cards by name, drag to reorder the deck, split at a selected card, reset or shuffle order, adjust thumbnail size
+- **Card stacking** — select multiple cards and/or decks and stack them into a new deck-like stack (`Ctrl+G`); disband a stack to return cards to their original decks
+- **Spread** — spread a deck's cards horizontally on the canvas (`Ctrl+Shift+G`)
+- **Recall** — return canvas cards to their decks via the Recall dialog (`Ctrl+R`)
+- **Hand strip** — persistent card hand at the bottom of the window; drag cards to canvas, reorder within hand, multi-select, return to deck
+
+### Dice
+
+- **Dice Bag** — place dice on the canvas from a palette of d4, d6, d8, d10, d12, d20, and dF (Fate/Fudge)
+- **Rolling** — press `R` to roll all selected dice; double-click a die to roll it; roll animation plays on each roll
+- **Roll Log** — running history of all rolls, updated in real time; accessible from the die context menu
+- **Custom dice sets** — load custom dice face images from the `Dice\` folder; manage sets via the Dice Bag
+
+### Images
+
+- **Drag and drop** — drag image files from Explorer or your file manager directly onto the canvas
+- **Paste from clipboard** — `Ctrl+V` pastes any image copied from a browser, editor, or file; auto-saved to your local Images folder
+- **Image Library** — browse and manage your image collection; Scene tab shows canvas images, Library tab shows all saved images
+- **Localise** — copy externally linked images into your local library for portability
+- **Anchor** — pin an image flat to the canvas background so it never moves or interferes with other items
+- **Hover preview** — hover over any image to see a full-size preview (configurable)
+- **Resize** — drag corners to resize; hold Shift to lock aspect ratio
+- **Rotate** — `E` / `Q` keys or mousewheel while hovering; configurable rotation step
+
+### Sticky Notes
+
+- **Freeform notes** — place resizable, rotatable sticky notes anywhere on the canvas
+- **Rich text editor** — bold, italic, underline formatting within each note
+- **Customisable appearance** — set note background colour and font colour per note or from the Settings dialog
+- **Copy / Paste** — duplicate sticky notes via `Ctrl+C` / `Ctrl+V` or the context menu
+- **Lock** — lock a sticky note in place to prevent accidental moves
+
+### Notepad
+
+- **WYSIWYG Markdown editor** — write in rich text, saved as `.md` files
+- **Heading styles** — H1, H2, H3 with distinct visual sizing; click again to remove
+- **Text formatting** — Bold (`Ctrl+B`), Italic (`Ctrl+I`), Underline (`Ctrl+U`)
+- **Font controls** — choose font family and size; settings persist between sessions
+- **Multi-file** — open, save, and switch between any number of Markdown files
+- **PDF Viewer** — open and page through PDF files from the Notepad window
+
+### Sessions
+
+- **Named sessions** — save and load canvas states with a name of your choice
+- **Thumbnail previews** — each session stores a canvas screenshot; the Open Session dialog shows previews at a glance
+- **Autosave** — automatically saves on window close; saves to the active session if named, otherwise to a timestamped autosave
+- **Session picker** — browse and delete saved sessions from the Open dialog
+
+### Settings
+
+- **Rebindable hotkeys** — every keyboard shortcut can be reassigned from the Settings dialog
+- **Canvas** — background colour, grid style (dots / lines), grid size, snap-to-grid toggle
+- **Display** — zoom limits, hover preview enable/disable, card dimensions, rotation step
+- **Sticky Notes** — default font family, size, font colour, and note colour for new notes
+- **Measurement** — scale, units, line style
+- **Drawing** — default tool, colour, stroke width, opacity
+
+---
+
+## Hotkeys
+
+All hotkeys are rebindable in **Settings → Hotkeys**. Press `K` at any time to open the in-app hotkey reference.
+
+### Canvas & Navigation
+
+| Key | Action |
+|-----|--------|
+| Scroll wheel | Zoom in / out |
+| `=` / `-` | Zoom in / out |
+| `Ctrl+0` | Reset zoom |
+| Middle-click drag | Pan |
+| Right-click drag | Pan |
+| `G` | Toggle grid |
+| `H` | Toggle hand strip |
+| `M` | Toggle magnify overlay |
+| `Escape` | Exit active tool / show startup dialog |
+
+### Selection & Items
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+A` | Select all |
+| `Ctrl+C` | Copy selected |
+| `Ctrl+V` | Paste |
+| `Delete` | Delete selected |
+| `L` | Lock / unlock selected |
+| `U` | Send selected to back |
+| `E` | Rotate clockwise |
+| `Q` | Rotate counter-clockwise |
+| `F` | Flip selected cards / decks |
+
+### Cards & Decks
+
+| Key | Action |
+|-----|--------|
+| `1`–`9` | Draw N cards from hovered deck to hand |
+| `R` | Shuffle selected deck(s) |
+| `Ctrl+G` | Stack selected cards / decks |
+| `Ctrl+Shift+G` | Spread selected deck horizontally |
+| `Ctrl+R` | Open Recall dialog |
+
+### Dice
+
+| Key | Action |
+|-----|--------|
+| `R` | Roll selected dice (simultaneously with shuffle if decks also selected) |
+| Double-click | Roll die |
+
+### Tools & Dialogs
+
+| Key | Action |
+|-----|--------|
+| `N` | Open Notepad |
+| `D` | Open Deck Library |
+| `I` | Open Image Library |
+| `B` | Open Dice Bag |
+| `K` | Open Hotkey Reference |
+| `Ctrl+N` | New session |
+| `Ctrl+S` | Save session |
+| `Ctrl+O` | Open session |
+| `Ctrl+I` | Import deck |
+| `Ctrl+Z` | Undo |
+| `Ctrl+Shift+Z` | Redo |
 
 ---
 
@@ -70,236 +242,12 @@ Decks/
     card_01.png
     card_02.png
     ...
-    back.png          ← must be named "back" (any supported image format)
+    back.png          ← must contain "back" in the filename
 ```
 
-Supported image formats: `.png`, `.jpg`, `.jpeg`, `.bmp`, `.gif`, `.tiff`, `.webp`
+Supported formats: `.png`, `.jpg`, `.jpeg`, `.bmp`, `.gif`, `.tiff`, `.webp`
 
-The back image is identified by its filename containing the word `back`. All other images in the folder become cards.
-
----
-
-## The Canvas
-
-### Navigation
-
-| Action | Result |
-|---|---|
-| Scroll wheel | Zoom in / out |
-| Middle-click drag | Pan |
-| Right-click drag | Pan |
-| Right-click (empty area) | Canvas context menu |
-
-### Selecting Items
-
-| Action | Result |
-|---|---|
-| Left-click | Select item |
-| Ctrl+click | Add to selection |
-| Click and drag (empty area) | Rubber-band select |
-| Ctrl+A | Select all |
-
-### Moving & Arranging
-
-Items can be freely dragged. To control Z-order (layering):
-
-| Key | Action |
-|---|---|
-| `U` | Send selected item(s) to the back |
-| Left-click any item | Raises it to the top |
-
-### Locking Items
-
-Right-click any item and choose **Lock / Anchor** to pin it in place. Locked items cannot be moved and do not show hover previews.
-
----
-
-## Cards & Decks
-
-### Placing a Deck
-
-Open the **Deck Library** (`D` key or Tools menu) and double-click a deck to place it on the canvas.
-
-### Drawing Cards
-
-Hover your cursor over a deck on the canvas, then press a number key:
-
-| Key | Action |
-|---|---|
-| `1` – `9` | Draw that many cards to your **hand** |
-| `Shift` + `1`–`9` | Draw cards directly to the **canvas** |
-
-### Card Actions
-
-| Key / Action | Result |
-|---|---|
-| `F` | Flip selected card(s) or deck(s) face-up / face-down |
-| `R` | Shuffle selected deck(s) / roll selected dice |
-| `U` | Send selected item(s) to back |
-| Double-click card | Flip it |
-| Right-click item | Context menu (flip, lock, discard, etc.) |
-
-### The Hand
-
-The **hand strip** runs along the bottom of the window. Cards drawn to the hand appear here.
-
-| Action | Result |
-|---|---|
-| Click a card | Select it |
-| Drag a card to canvas | Place it on the canvas |
-| Drag a card within the hand | Reorder the hand |
-| Click and drag (empty space) | Rubber-band multi-select |
-| Right-click | Hand context menu |
-
-The **LIB** button (left side) opens the Deck Library. The **RCL** button returns canvas cards to their decks.
-
-### Stacking Cards
-
-Select multiple card items on the canvas, then right-click → **Stack** to combine them into a new deck-like stack. Stacks behave like decks and can be drawn from, shuffled, and searched.
-
-To return a stack's cards to their original decks: right-click → **Disband Stack**.
-
-### Deck Search / Card Picker
-
-Right-click a deck or stack → **Search / Browse** to open the Card Picker. From here you can:
-
-- **Search** cards by name
-- **Drag rows** to reorder the deck
-- **Split** the deck at the selected card (cards above go into a new stack)
-- **Reset Order** — restore alphabetical order
-- **Shuffle** — randomise the deck
-- Adjust **thumbnail size** with the slider
-
----
-
-## Dice
-
-### Opening the Dice Bag
-
-Press `B` or use the Tools menu to open the **Dice Bag**. Select a die type and click **Add to Canvas**.
-
-Available dice: d4, d6, d8, d10, d12, d20, dF (Fate/Fudge)
-
-### Rolling Dice
-
-| Action | Result |
-|---|---|
-| `R` | Roll all selected dice |
-| Double-click die | Roll it |
-| Right-click die | Context menu |
-
-Dice display their result and animate when rolled. Roll history is available in the **Roll Log** (accessible from the right-click context menu).
-
----
-
-## Images
-
-### Adding Images
-
-**From the Image Library** (`I` key): browse and place previously imported images.
-
-**Drag and drop**: drag an image file from Windows Explorer onto the canvas.
-
-**Paste from clipboard** (`Ctrl+V`): paste any image copied from a browser, image editor, or file. The image is automatically saved to your local Images folder.
-
-### Image Library
-
-The Image Library (`I`) manages your image collection:
-
-- **Scene tab** — images currently on the canvas
-- **Library tab** — all locally saved images
-
-From the Library tab you can:
-- **Spawn** an image onto the canvas
-- **Rename** an image (right-click → Rename)
-- **Delete** an image (with confirmation; warns if in use on canvas)
-- **Localize** linked images (copies them into your local folder)
-- **Create folders** and **move images** between folders for organisation
-
----
-
-## Notepad
-
-Press `N` or use the Tools menu to open the **Notepad**.
-
-The Notepad is a WYSIWYG Markdown editor. Files are saved as `.md` and rendered as rich text.
-
-### File Menu
-
-| Action | Description |
-|---|---|
-| New | Start a blank untitled note |
-| Open | Open any `.md`, `.html`, or `.txt` file |
-| Save | Save the current file (or prompt for location if untitled) |
-| Save As | Save to a new location |
-
-The last opened note is remembered and reloaded automatically.
-
-### Formatting
-
-| Button / Key | Format |
-|---|---|
-| **B** / Ctrl+B | Bold |
-| *I* / Ctrl+I | Italic |
-| U / Ctrl+U | Underline |
-| H1 / Ctrl+1 | Heading 1 |
-| H2 / Ctrl+2 | Heading 2 |
-| H3 / Ctrl+3 | Heading 3 |
-
-Headings are displayed larger, bold, and underlined (relative to your chosen font size). Clicking a heading button again on an already-formatted line removes the heading.
-
-Use the **Font** and **Size** menus to choose a display font and size. These are display-only preferences — the underlying Markdown is not affected. Settings persist between sessions.
-
----
-
-## Sessions
-
-### Saving
-
-- **File → Save** — saves to the current named session (or prompts for a name if unsaved)
-- **File → Save As** — save under a new name
-- Each save includes a **canvas screenshot** stored alongside the session file
-
-### Loading
-
-- **File → Open Session** — browse saved sessions with thumbnail previews
-- Sessions can be deleted from the Open Session dialog (click the **✕** button, then confirm)
-
-### Autosave
-
-SoloCanvas autosaves when you close the window:
-- If a named session is active, it saves to that session
-- Otherwise it saves to a timestamped autosave file
-
-### Startup
-
-On launch, a dialog asks whether to **start a new session** or **load a saved one**.
-
----
-
-## Settings & Hotkeys
-
-Open **Settings** from the menu bar to configure:
-
-- **Hotkeys** — rebind all keyboard shortcuts
-- **Canvas** — background colour, grid style, grid size, snap-to-grid
-- **Display** — zoom limits, hover preview, card sizes
-
-### Default Hotkeys
-
-| Key | Action |
-|---|---|
-| `1`–`9` | Draw cards from hovered deck to hand |
-| `Shift`+`1`–`9` | Draw cards from hovered deck to canvas |
-| `F` | Flip selected cards / decks |
-| `R` | Roll selected dice / shuffle selected decks |
-| `U` | Send selected items to back |
-| `N` | Open Notepad |
-| `D` | Open Deck Library |
-| `I` | Open Image Library |
-| `B` | Open Dice Bag |
-| `Ctrl+V` | Paste image from clipboard |
-| `Ctrl+1/2/3` | Apply H1/H2/H3 in Notepad |
+All images whose filename contains `back` become the deck back. All other images become cards.
 
 ---
 
@@ -310,34 +258,18 @@ SoloCanvas/
   main.py             ← entry point
   src/                ← application source
   Decks/              ← card decks (one subfolder per deck)
-  Dice/               ← dice SVG assets (bundled)
+  Dice/               ← dice SVG assets
   Images/             ← localised image library
-  Notes/              ← notepad files
-  launch.bat          ← Windows launch helper
+  Notes/              ← notepad Markdown files
+  launch.bat          ← Windows launch script
+  launch.sh           ← Linux launch script
   build.bat           ← Windows PyInstaller build script
-  requirements.txt
+  requirements.txt    ← Python dependencies
 ```
 
-User data (sessions, settings) is stored in `%APPDATA%\SoloCanvas\`.
-
----
-
-## Screenshots
-
-**Canvas & Notepad** Split screen with Foxit Reader, which is how I use it a lot.
-![Canvas and Notepad](screenshots/notepad_canvas.png)
-
-**Deck Search** — Browse and manage decks on the canvas.
-![Deck Search Dialog](screenshots/deck_search.png)
-
-**Dice Bag & Roll Log** — Add custom dice to the canvas, make new sets, access Roll Log.
-![Dice Bag and Roll Log](screenshots/dice_bag.png)
-
-**Deck Library** — The deck subfolder turn into decks and are accessed in your Deck Library
-![Deck Library Dialog](screenshots/deck_library.png)
-
-**Open Session** — Open a saved session, or the autosave if you didn't save it on your own.
-![Open Session Dialog](screenshots/open_session.png)
+User data (sessions, settings, autosaves) is stored in:
+- **Windows:** `%APPDATA%\SoloCanvas\`
+- **Linux:** `~/.local/share/SoloCanvas/` *(or equivalent)*
 
 ---
 
