@@ -96,6 +96,7 @@ dist\SoloCanvas\SoloCanvas.exe
 - **Measurement tool** — drag to measure distances on the canvas with configurable scale and units. Area and cone measurement as well.
 - **Mini Map** — floating overview centered on a selcted image item. Good for 
 - **Multi-select** — rubber-band select, `Ctrl+A`, or `Ctrl+click`; batch actions (flip, roll, rotate, delete, lock) apply to all eligible selected items with counts shown in context menus
+- **PDF Viewer** — open and page through PDF files from the Notepad window
 
 ### Cards & Decks
 
@@ -139,7 +140,6 @@ dist\SoloCanvas\SoloCanvas.exe
 - **Text formatting** — Bold (`Ctrl+B`), Italic (`Ctrl+I`), Underline (`Ctrl+U`)
 - **Font controls** — choose font family and size; settings persist between sessions
 - **Multi-file** — open, save, and switch between any number of Markdown files
-- **PDF Viewer** — open and page through PDF files from the Notepad window
 
 ### Sessions
 
