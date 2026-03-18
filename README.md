@@ -93,9 +93,8 @@ dist\SoloCanvas\SoloCanvas.exe
 - **Grid** — optional dot or line grid with configurable size and snap-to-grid
 - **Undo / Redo** — full undo history for canvas actions (`Ctrl+Z` / `Ctrl+Shift+Z`)
 - **Drawing tools** — freehand draw and shape tools (line, rectangle, ellipse) with configurable colour, width, and opacity
-- **Measurement tool** — drag to measure distances on the canvas with configurable scale and units
-- **Mini Map** — floating overview of the full canvas with click-to-navigate
-- **Magnify overlay** — hold `M` to magnify the card or image under the cursor
+- **Measurement tool** — drag to measure distances on the canvas with configurable scale and units. Area and cone measurement as well.
+- **Mini Map** — floating overview centered on a selcted image item. Good for 
 - **Multi-select** — rubber-band select, `Ctrl+A`, or `Ctrl+click`; batch actions (flip, roll, rotate, delete, lock) apply to all eligible selected items with counts shown in context menus
 
 ### Cards & Decks
@@ -131,15 +130,12 @@ dist\SoloCanvas\SoloCanvas.exe
 ### Sticky Notes
 
 - **Freeform notes** — place resizable, rotatable sticky notes anywhere on the canvas
-- **Rich text editor** — bold, italic, underline formatting within each note
 - **Customisable appearance** — set note background colour and font colour per note or from the Settings dialog
 - **Copy / Paste** — duplicate sticky notes via `Ctrl+C` / `Ctrl+V` or the context menu
 - **Lock** — lock a sticky note in place to prevent accidental moves
 
 ### Notepad
 
-- **WYSIWYG Markdown editor** — write in rich text, saved as `.md` files
-- **Heading styles** — H1, H2, H3 with distinct visual sizing; click again to remove
 - **Text formatting** — Bold (`Ctrl+B`), Italic (`Ctrl+I`), Underline (`Ctrl+U`)
 - **Font controls** — choose font family and size; settings persist between sessions
 - **Multi-file** — open, save, and switch between any number of Markdown files
