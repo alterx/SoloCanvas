@@ -744,6 +744,7 @@ class HandWidget(QWidget):
             ]
             cards_list = [
                 {"image_path": h.card_data.image_path, "deck_id": h.card_data.deck_id,
+                 "card_id": h.card_data.id,
                  "face_up": h.face_up, "rotation": h.rotation}
                 for h in selected_states
             ]
@@ -753,6 +754,7 @@ class HandWidget(QWidget):
             card_dict = {
                 "image_path": hs.card_data.image_path,
                 "deck_id":    hs.card_data.deck_id,
+                "card_id":    hs.card_data.id,
                 "face_up":    hs.face_up,
                 "rotation":   hs.rotation,
             }
@@ -777,7 +779,7 @@ class HandWidget(QWidget):
                 self._selected.clear()
                 self._last_clicked_idx = None
             else:
-                self.remove_card_by_image_path(hs.card_data.image_path)
+                self.remove_card_by_id(hs.card_data.id)
             self._after_cards_changed()
             self.update()
 

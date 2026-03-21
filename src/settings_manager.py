@@ -339,6 +339,10 @@ class SettingsManager:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    def custom_decks_library_path(self) -> Path:
+        """JSON file listing saved custom (virtual) decks for the Deck Library tab."""
+        return _config_dir() / "custom_decks_library.json"
+
     def decks_dir(self) -> Path:
         """Decks library folder – next to the exe when frozen, otherwise project root."""
         if getattr(sys, "frozen", False):

@@ -278,10 +278,10 @@ class CanvasView(QGraphicsView):
                 self.drag_near_hand.emit(near)
 
             # Deck merge glow: find a non-selected DeckItem under the held item
-            held_scene_pos = self._held_item.scenePos()
+            ptr_scene = self.mapToScene(event.pos())
             new_target = None
-            for item in self.scene().items(held_scene_pos):
-                if isinstance(item, DeckItem) and item is not self._held_item and not item.isSelected():
+            for item in self.scene().items(ptr_scene):
+                if isinstance(item, DeckItem) and item is not self._held_item:
                     new_target = item
                     break
             if new_target is not self._merge_target:
@@ -342,11 +342,12 @@ class CanvasView(QGraphicsView):
             if isinstance(held, (CardItem, DeckItem)):
                 scene = self.scene()
 
-                # Check for deck merge: held item (or any selected item) dropped on a DeckItem
-                held_scene_pos = held.scenePos()
+                # Check for deck merge: drop point over a DeckItem (cursor, not card centre —
+                # allows dropping onto a selected custom deck, etc.)
+                drop_scene = self.mapToScene(event.pos())
                 target_deck = None
-                for item in scene.items(held_scene_pos):
-                    if isinstance(item, DeckItem) and item is not held and not item.isSelected():
+                for item in scene.items(drop_scene):
+                    if isinstance(item, DeckItem) and item is not held:
                         target_deck = item
                         break
 

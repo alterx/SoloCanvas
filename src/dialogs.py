@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from PyQt6.QtCore import Qt, QEasingCurve, QPropertyAnimation, QSize, QTimer, pyqtProperty, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QFont, QIcon, QKeySequence, QPainter, QPainterPath, QPixmap, QTransform
@@ -1151,20 +1151,23 @@ _THUMB_W, _THUMB_H = 54, 76   # thumbnail dimensions for previews
 
 class DeckLibraryDialog(QDialog):
     """
-    Shows all decks in the project Decks/ folder with image previews.
-    Decks can be added to the canvas via a callback.  An import button
-    copies an external folder into the library and optionally adds it.
+    Tab 1: decks in the project Decks/ folder (image folders).
+    Tab 2: saved custom decks (virtual decks stored in app data).
     """
 
     def __init__(
         self,
         decks_dir: Path,
-        add_deck_callback: Callable[[str], None],
+        add_folder_deck_callback: Callable[[str], None],
+        add_saved_deck_callback: Callable[[dict], None],
+        library_json_path: Path,
         parent=None,
     ):
         super().__init__(parent)
         self._decks_dir = decks_dir
-        self._add_deck_cb = add_deck_callback
+        self._add_folder_cb = add_folder_deck_callback
+        self._add_saved_cb = add_saved_deck_callback
+        self._library_json_path = library_json_path
         self.setWindowTitle("Deck Library")
         self.setMinimumSize(640, 520)
         self.setWindowModality(Qt.WindowModality.NonModal)
@@ -1179,12 +1182,19 @@ class DeckLibraryDialog(QDialog):
         lay.setContentsMargins(12, 12, 12, 8)
         lay.setSpacing(8)
 
-        # Header
-        header = QLabel("Your Deck Library")
+        header = QLabel("Deck Library")
         header.setStyleSheet("font-size: 16px; font-weight: bold; padding-bottom: 4px;")
         lay.addWidget(header)
 
-        # Scroll area
+        self._tabs = QTabWidget()
+        lay.addWidget(self._tabs, 1)
+
+        # —— Tab 1: image folders ——
+        tab_folders = QWidget()
+        tab_f_lay = QVBoxLayout(tab_folders)
+        tab_f_lay.setContentsMargins(4, 8, 4, 4)
+        tab_f_lay.setSpacing(6)
+
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(self._scroll.Shape.NoFrame)
@@ -1196,33 +1206,74 @@ class DeckLibraryDialog(QDialog):
         self._deck_layout.addStretch()
 
         self._scroll.setWidget(self._container)
-        lay.addWidget(self._scroll, 1)
+        tab_f_lay.addWidget(self._scroll, 1)
 
-        # Bottom bar
-        bar = QWidget()
-        bar_lay = QHBoxLayout(bar)
-        bar_lay.setContentsMargins(0, 4, 0, 0)
-
+        f_bar = QHBoxLayout()
         import_btn = QPushButton("Import Folder into Library…")
         import_btn.clicked.connect(self._import_folder)
-        bar_lay.addWidget(import_btn)
-        bar_lay.addStretch()
+        f_bar.addWidget(import_btn)
+        f_bar.addStretch()
+        tab_f_lay.addLayout(f_bar)
 
+        self._tabs.addTab(tab_folders, "Image folders")
+
+        # —— Tab 2: saved custom decks ——
+        tab_saved = QWidget()
+        tab_s_lay = QVBoxLayout(tab_saved)
+        tab_s_lay.setContentsMargins(4, 8, 4, 4)
+        tab_s_lay.setSpacing(6)
+
+        hint = QLabel(
+            "Decks you saved from the canvas (right-click a custom deck → "
+            "<b>Save to Deck Library</b>). Add them to any session below."
+        )
+        hint.setTextFormat(Qt.TextFormat.RichText)
+        hint.setWordWrap(True)
+        hint.setStyleSheet("font-size: 12px; color: #a6adc8; padding: 0 4px 4px 4px;")
+        tab_s_lay.addWidget(hint)
+
+        self._saved_scroll = QScrollArea()
+        self._saved_scroll.setWidgetResizable(True)
+        self._saved_scroll.setFrameShape(self._saved_scroll.Shape.NoFrame)
+
+        self._saved_container = QWidget()
+        self._saved_layout = QVBoxLayout(self._saved_container)
+        self._saved_layout.setSpacing(6)
+        self._saved_layout.setContentsMargins(0, 0, 4, 0)
+        self._saved_layout.addStretch()
+
+        self._saved_scroll.setWidget(self._saved_container)
+        tab_s_lay.addWidget(self._saved_scroll, 1)
+
+        self._tabs.addTab(tab_saved, "Saved custom")
+
+        self._tabs.currentChanged.connect(self._on_tab_changed)
+
+        bar = QHBoxLayout()
+        bar.setContentsMargins(0, 4, 0, 0)
+        bar.addStretch()
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.accept)
-        bar_lay.addWidget(close_btn)
+        bar.addWidget(close_btn)
+        lay.addLayout(bar)
 
-        lay.addWidget(bar)
+        self._refresh_folders()
+        self._refresh_saved()
 
-        self._refresh()
+    def _on_tab_changed(self, index: int) -> None:
+        if index == 1:
+            self._refresh_saved()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._refresh_saved()
 
     # ------------------------------------------------------------------
     # Load / refresh
     # ------------------------------------------------------------------
 
-    def _refresh(self) -> None:
+    def _refresh_folders(self) -> None:
         """Re-scan the Decks folder and rebuild the list."""
-        # Remove all items except the trailing stretch
         while self._deck_layout.count() > 1:
             item = self._deck_layout.takeAt(0)
             if item.widget():
@@ -1241,11 +1292,39 @@ class DeckLibraryDialog(QDialog):
             return
 
         for i, deck_path in enumerate(deck_dirs):
-            entry = self._make_entry(deck_path)
+            entry = self._make_folder_entry(deck_path)
             self._deck_layout.insertWidget(i, entry)
 
-    def _make_entry(self, deck_path: Path) -> QWidget:
-        """Build one deck row widget."""
+    def _refresh_saved(self) -> None:
+        from . import custom_decks_store as _cds
+
+        while self._saved_layout.count() > 1:
+            item = self._saved_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        entries = sorted(
+            _cds.load_entries(self._library_json_path),
+            key=lambda e: (e.get("name") or "").lower(),
+        )
+        if not entries:
+            ph = QLabel(
+                "No saved custom decks yet.<br><br>"
+                "Create a custom deck on the canvas, then right-click it and choose "
+                "<b>Save to Deck Library</b>."
+            )
+            ph.setTextFormat(Qt.TextFormat.RichText)
+            ph.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            ph.setStyleSheet("font-size: 13px; padding: 30px;")
+            self._saved_layout.insertWidget(0, ph)
+            return
+
+        for i, ent in enumerate(entries):
+            row = self._make_saved_entry(ent)
+            self._saved_layout.insertWidget(i, row)
+
+    def _make_folder_entry(self, deck_path: Path) -> QWidget:
+        """Build one image-folder deck row."""
         back_pix: Optional[QPixmap] = None
         front_pixmaps: List[QPixmap] = []
         card_count = 0
@@ -1300,20 +1379,140 @@ class DeckLibraryDialog(QDialog):
         # Add to Canvas button
         add_btn = QPushButton("Add to Canvas")
         add_btn.clicked.connect(
-            lambda checked=False, p=str(deck_path), b=add_btn: self._add_deck(p, b)
+            lambda checked=False, p=str(deck_path), b=add_btn: self._add_folder_deck(p, b)
         )
         outer.addWidget(add_btn)
 
         return entry
 
+    def _make_saved_entry(self, entry: Dict[str, Any]) -> QWidget:
+        """One row for a persisted custom deck (JSON entry)."""
+        from . import custom_decks_store as _cds
+
+        deck = entry.get("deck") or {}
+        all_cards: List[dict] = list(deck.get("all_cards", []))
+        back_path = deck.get("back_path") or ""
+
+        back_pix: Optional[QPixmap] = None
+        if back_path:
+            bp = Path(back_path)
+            if bp.is_file():
+                back_pix = QPixmap(str(bp))
+
+        front_pixmaps: List[QPixmap] = []
+        for c in all_cards:
+            if len(front_pixmaps) >= 3:
+                break
+            ip = c.get("image_path") or ""
+            p = Path(ip)
+            if p.is_file():
+                front_pixmaps.append(QPixmap(str(p)))
+
+        n_cards = len(all_cards)
+        display_name = entry.get("name") or deck.get("name") or "Custom deck"
+        entry_id = entry.get("entry_id", "")
+
+        row = QWidget()
+        row.setObjectName("savedDeckEntry")
+        outer = QHBoxLayout(row)
+        outer.setContentsMargins(12, 10, 12, 10)
+        outer.setSpacing(10)
+
+        for pix in [back_pix] + front_pixmaps + [None] * (3 - len(front_pixmaps)):
+            lbl = QLabel()
+            lbl.setFixedSize(_THUMB_W, _THUMB_H)
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            if pix and not pix.isNull():
+                scaled = pix.scaled(
+                    _THUMB_W, _THUMB_H,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                lbl.setPixmap(scaled)
+            outer.addWidget(lbl)
+
+        outer.addSpacing(6)
+
+        info = QWidget()
+        info_lay = QVBoxLayout(info)
+        info_lay.setContentsMargins(0, 0, 0, 0)
+        info_lay.setSpacing(3)
+        name_lbl = QLabel(display_name)
+        name_lbl.setStyleSheet("font-weight: bold; font-size: 14px;")
+        count_lbl = QLabel(f"{n_cards} card{'s' if n_cards != 1 else ''}")
+        count_lbl.setStyleSheet("font-size: 12px;")
+        info_lay.addWidget(name_lbl)
+        info_lay.addWidget(count_lbl)
+        info_lay.addStretch()
+        outer.addWidget(info, 1)
+
+        add_btn = QPushButton("Add to Canvas")
+        add_btn.clicked.connect(
+            lambda checked=False, d=dict(deck), b=add_btn: self._add_saved_deck(d, b)
+        )
+
+        rename_btn = QPushButton("Rename…")
+        rename_btn.clicked.connect(
+            lambda checked=False, eid=entry_id, nm=display_name: self._rename_saved_entry(
+                eid, nm
+            )
+        )
+
+        del_btn = QPushButton("Delete")
+        del_btn.clicked.connect(
+            lambda checked=False, eid=entry_id: self._delete_saved_entry(eid)
+        )
+
+        btn_col = QVBoxLayout()
+        btn_col.setSpacing(4)
+        btn_col.addWidget(add_btn)
+        btn_col.addWidget(rename_btn)
+        btn_col.addWidget(del_btn)
+        outer.addLayout(btn_col)
+
+        return row
+
     # ------------------------------------------------------------------
     # Actions
     # ------------------------------------------------------------------
 
-    def _add_deck(self, folder_path: str, btn: "QPushButton") -> None:
-        self._add_deck_cb(folder_path)
+    def _add_folder_deck(self, folder_path: str, btn: "QPushButton") -> None:
+        self._add_folder_cb(folder_path)
         btn.setText("Added ✓")
         btn.setEnabled(False)
+
+    def _add_saved_deck(self, deck_dict: dict, btn: "QPushButton") -> None:
+        self._add_saved_cb(dict(deck_dict))
+        btn.setText("Added ✓")
+        btn.setEnabled(False)
+
+    def _rename_saved_entry(self, entry_id: str, current_name: str) -> None:
+        from . import custom_decks_store as _cds
+        from PyQt6.QtWidgets import QInputDialog
+
+        name, ok = QInputDialog.getText(
+            self, "Rename Saved Deck", "Name:", text=current_name
+        )
+        if not ok or not name.strip():
+            return
+        if _cds.rename_entry(self._library_json_path, entry_id, name.strip()):
+            self._refresh_saved()
+
+    def _delete_saved_entry(self, entry_id: str) -> None:
+        from . import custom_decks_store as _cds
+
+        resp = QMessageBox.question(
+            self,
+            "Delete Saved Deck",
+            "Remove this deck from your saved library?\n"
+            "(The canvas and image files are not affected.)",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if resp != QMessageBox.StandardButton.Yes:
+            return
+        if _cds.delete_entry(self._library_json_path, entry_id):
+            self._refresh_saved()
 
     def _import_folder(self) -> None:
         from PyQt6.QtWidgets import QMessageBox
@@ -1333,9 +1532,9 @@ class DeckLibraryDialog(QDialog):
             except Exception as exc:
                 QMessageBox.warning(self, "Import Failed", f"Could not copy deck:\n{exc}")
                 return
-        self._refresh()
+        self._refresh_folders()
         # Auto-add the newly imported deck
-        self._add_deck_cb(str(dest))
+        self._add_folder_cb(str(dest))
 
 
 # ==============================================================================

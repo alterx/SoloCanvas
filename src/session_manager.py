@@ -134,6 +134,8 @@ class SessionManager:
                 entry["canvas_y"]   = di.pos().y()
                 entry["rotation"]   = di.rotation()
                 entry["face_up"]    = di.face_up
+                entry["is_stack"]   = di.is_stack
+                entry["reversal_enabled"] = di.reversal_enabled
             decks_data.append(entry)
 
         # Cards on canvas
@@ -143,6 +145,7 @@ class SessionManager:
                 canvas_cards.append({
                     "image_path": item.card_data.image_path,
                     "deck_id":    item.card_data.deck_id,
+                    "card_id":    item.card_data.id,
                     "x":          item.pos().x(),
                     "y":          item.pos().y(),
                     "rotation":   item.rotation(),
@@ -157,6 +160,7 @@ class SessionManager:
             hand_cards.append({
                 "image_path": hs.card_data.image_path,
                 "deck_id":    hs.card_data.deck_id,
+                "card_id":    hs.card_data.id,
                 "face_up":    hs.face_up,
                 "rotation":   hs.rotation,
             })

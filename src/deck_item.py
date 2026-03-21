@@ -53,8 +53,10 @@ class DeckItem(QGraphicsObject):
     recall_stack_requested = pyqtSignal(object)  # emits self (stacks only)
     stack_emptied          = pyqtSignal(object)  # emits self when last card drawn from a stack
     stack_requested        = pyqtSignal()        # request MainWindow to stack selected items
+    custom_deck_requested  = pyqtSignal()        # create deck from selection (cloned cards)
     before_draw            = pyqtSignal()        # fires before any card is removed from model
     duplicate_requested    = pyqtSignal(object)  # emits self
+    save_to_library_requested = pyqtSignal(object)  # custom deck → persist in Deck Library
     delete_requested          = pyqtSignal(object)  # emits self when "Delete" is chosen
     delete_selected_requested = pyqtSignal()        # delete all selected items
     open_recall_requested  = pyqtSignal()        # emits when "Recall" is chosen
@@ -349,8 +351,10 @@ class DeckItem(QGraphicsObject):
         if self.is_stack and self.deck_model.count == 0:
             self.stack_emptied.emit(self)
 
-    def receive_card(self, card_data) -> None:
-        self.deck_model.add_to_bottom(card_data)
+    def receive_card(self, card_data, *, reparent_into_custom: bool = False) -> None:
+        self.deck_model.add_card_from_canvas_merge(
+            card_data, reparent=reparent_into_custom
+        )
         self._update_front_pix()
         self.update()
 
@@ -489,6 +493,11 @@ class DeckItem(QGraphicsObject):
             menu.addAction("Search Cards…", lambda: self.search_cards_requested.emit(self))
             menu.addSeparator()
             menu.addAction("Duplicate", lambda: self.duplicate_requested.emit(self))
+            if not self.is_stack and self.deck_model.folder_path is None:
+                menu.addAction(
+                    "Save to Deck Library…",
+                    lambda: self.save_to_library_requested.emit(self),
+                )
             menu.addSeparator()
 
         # Shuffle
@@ -514,11 +523,21 @@ class DeckItem(QGraphicsObject):
         preview_label = "Preview: On" if self.hover_preview else "Preview: Off"
         menu.addAction(preview_label, lambda: self._toggle_hover_preview())
 
-        # Stack selected items (when 2+ cards/stacks are selected)
+        # Stack (2+ top-level items) / custom deck (same, or one pile with 1+ cards)
         total_sel = len(sel_cards) + len(sel_decks)
-        if total_sel >= 2:
+        n_cards_in_sel = len(sel_cards) + sum(d.deck_model.count for d in sel_decks)
+        one_pile_only = len(sel_cards) == 0 and len(sel_decks) == 1
+        show_stack = total_sel >= 2
+        show_custom_deck = show_stack or (one_pile_only and n_cards_in_sel >= 1)
+        if show_stack or show_custom_deck:
             menu.addSeparator()
+        if show_stack:
             menu.addAction(f"Stack {total_sel} Selected Items", self.stack_requested.emit)
+        if show_custom_deck:
+            menu.addAction(
+                f"Create custom deck ({n_cards_in_sel} cards)…",
+                self.custom_deck_requested.emit,
+            )
 
         # Stack-only: disband back to parent decks (single deck only)
         if self.is_stack and not multi:

@@ -57,6 +57,18 @@ class CardData:
         )
 
 
+def clone_card_for_deck(card: CardData, new_deck_id: str) -> CardData:
+    """Copy a card into another deck with a new identity (allows duplicates in the pile)."""
+    return CardData(
+        id=str(uuid.uuid4()),
+        deck_id=new_deck_id,
+        image_path=card.image_path,
+        back_path=card.back_path,
+        name=card.name,
+        reversed=card.reversed,
+    )
+
+
 class DeckModel:
     """Mutable state of a deck: which cards remain, in what order."""
 
@@ -131,6 +143,19 @@ class DeckModel:
         if card not in self.cards:
             self.cards.append(card)
 
+    def add_card_from_canvas_merge(self, card: CardData, *, reparent: bool) -> None:
+        """Merge a canvas card into this pile.
+
+        Custom decks (caller sets reparent=True) get a cloned CardData so source
+        deck definitions stay intact; stacks and folder decks keep the same object.
+        """
+        if reparent:
+            incoming = clone_card_for_deck(card, self.id)
+            self.all_cards.append(incoming)
+            self.add_to_bottom(incoming)
+        else:
+            self.add_to_bottom(card)
+
     def add_to_top(self, card: CardData) -> None:
         if card not in self.cards:
             self.cards.insert(0, card)
@@ -149,6 +174,12 @@ class DeckModel:
                 return c
         return None
 
+    def card_by_id(self, card_id: str) -> Optional[CardData]:
+        for c in self.all_cards:
+            if c.id == card_id:
+                return c
+        return None
+
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
@@ -156,6 +187,11 @@ class DeckModel:
     @property
     def count(self) -> int:
         return len(self.cards)
+
+    def bind_cards_to_self(self) -> None:
+        """Set every card's deck_id to this deck (after duplicating a deck with a new id)."""
+        for c in self.all_cards:
+            c.deck_id = self.id
 
     # ------------------------------------------------------------------
     # Serialization
@@ -169,6 +205,7 @@ class DeckModel:
             "back_path": self.back_path,
             "all_cards": [c.to_dict() for c in self.all_cards],
             "card_order": [c.image_path for c in self.cards],
+            "card_order_ids": [c.id for c in self.cards],
             "deleted_card_ids": list(self.deleted_card_ids),
         }
 
@@ -181,16 +218,32 @@ class DeckModel:
         )
         deck.back_path = d.get("back_path")
 
-        # Prefer loading from folder (always fresh on disk)
+        # Prefer loading from folder (always fresh on disk; UUIDs are new each time)
         if deck.folder_path and Path(deck.folder_path).exists():
             deck._load_cards()
+            remaining = list(deck.all_cards)
+            deck.cards = []
+            for p in d.get("card_order", []):
+                for i, c in enumerate(remaining):
+                    if c.image_path == p:
+                        deck.cards.append(c)
+                        remaining.pop(i)
+                        break
         else:
             deck.all_cards = [CardData.from_dict(c) for c in d.get("all_cards", [])]
+            order_ids = d.get("card_order_ids")
+            if order_ids:
+                id_lookup = {c.id: c for c in deck.all_cards}
+                deck.cards = [id_lookup[i] for i in order_ids if i in id_lookup]
+            else:
+                remaining = list(deck.all_cards)
+                deck.cards = []
+                for p in d.get("card_order", []):
+                    for i, c in enumerate(remaining):
+                        if c.image_path == p:
+                            deck.cards.append(c)
+                            remaining.pop(i)
+                            break
 
-        # Restore pile order from saved image paths
-        path_lookup = {c.image_path: c for c in deck.all_cards}
-        deck.cards = [
-            path_lookup[p] for p in d.get("card_order", []) if p in path_lookup
-        ]
         deck.deleted_card_ids = set(d.get("deleted_card_ids", []))
         return deck

@@ -51,7 +51,7 @@ from .image_item     import ImageItem
 from .die_item       import DieItem
 from .dice_manager   import DiceSet, DiceSetsManager
 from .hand_widget    import HandWidget, _HAND_MARGIN_BOTTOM
-from .models         import CardData, DeckModel
+from .models         import CardData, DeckModel, clone_card_for_deck
 from .session_manager  import SessionManager
 from .settings_manager import SettingsManager
 from .minimap_dialog      import MiniMapDialog
@@ -165,7 +165,7 @@ class MainWindow(QMainWindow):
         # State
         self._deck_models: Dict[str, DeckModel] = {}   # deck_id → DeckModel
         self._deck_items:  Dict[str, DeckItem]  = {}   # deck_id → DeckItem
-        self._canvas_cards: Dict[str, CardItem] = {}   # card img_path → CardItem
+        self._canvas_cards: Dict[str, CardItem] = {}   # card id → CardItem
         self._active_deck_id: Optional[str]     = None
         self._session_path: Optional[Path]      = None
         self._magnify_key_held = False
@@ -761,9 +761,51 @@ class MainWindow(QMainWindow):
         dlg = DeckLibraryDialog(
             self._settings.decks_dir(),
             self._add_deck_from_path,
+            self._add_saved_custom_deck_from_library,
+            self._settings.custom_decks_library_path(),
             self,
         )
         self._show_nonmodal(dlg)
+
+    def _add_saved_custom_deck_from_library(self, deck_dict: dict) -> None:
+        """Spawn a new canvas deck from a library JSON entry (new ids)."""
+        import uuid as _uuid
+        from .models import DeckModel as _DM
+
+        state = dict(deck_dict)
+        state["id"] = str(_uuid.uuid4())
+        state["folder_path"] = None
+        dm = _DM.from_dict(state)
+        dm.bind_cards_to_self()
+        if not dm.all_cards:
+            QMessageBox.warning(
+                self, "Empty Deck",
+                "This saved deck has no cards (files may be missing).",
+            )
+            return
+        self._add_deck(dm)
+
+    def _on_save_custom_deck_to_library(self, di: DeckItem) -> None:
+        if di.is_stack or di.deck_model.folder_path is not None:
+            return
+        name, ok = QInputDialog.getText(
+            self,
+            "Save to Deck Library",
+            "Name in library:",
+            text=di.deck_model.name,
+        )
+        if not ok or not name.strip():
+            return
+        from .custom_decks_store import add_entry
+
+        add_entry(
+            self._settings.custom_decks_library_path(),
+            name.strip(),
+            di.deck_model.to_dict(),
+        )
+        self._status.showMessage(
+            f"Saved “{name.strip()}” to Deck Library (Saved custom tab).", 5000
+        )
 
     def _add_deck_from_path(self, folder_path: str) -> None:
         dm = DeckModel(folder_path)
@@ -813,8 +855,10 @@ class MainWindow(QMainWindow):
         di.recall_stack_requested.connect(self._on_recall_stack)
         di.stack_emptied.connect(self._on_stack_emptied)
         di.stack_requested.connect(self._on_stack_requested)
+        di.custom_deck_requested.connect(self._on_custom_deck_from_selection)
         di.before_draw.connect(self._push_undo)
         di.duplicate_requested.connect(self._on_deck_duplicate)
+        di.save_to_library_requested.connect(self._on_save_custom_deck_to_library)
         di.delete_requested.connect(self._on_deck_delete)
         di.delete_selected_requested.connect(self._delete_selected)
         di.open_recall_requested.connect(self._recall_dialog)
@@ -1028,6 +1072,7 @@ class MainWindow(QMainWindow):
         state = di.deck_model.to_dict()
         state["id"] = str(_uuid.uuid4())
         new_dm = DeckModel.from_dict(state)
+        new_dm.bind_cards_to_self()
         g = self._settings.canvas("grid_size")
         new_di = DeckItem(new_dm)
         new_di.face_up   = di.face_up
@@ -1414,7 +1459,7 @@ class MainWindow(QMainWindow):
 
         # Remove all source items from scene
         for ci in sel_cards:
-            self._canvas_cards.pop(ci.card_data.image_path, None)
+            self._canvas_cards.pop(ci.card_data.id, None)
             self._scene.removeItem(ci)
         for di in sel_decks:
             self._scene.removeItem(di)
@@ -1442,6 +1487,87 @@ class MainWindow(QMainWindow):
         self._deck_models[stack_dm.id] = stack_dm
         self._status.showMessage(
             f"Stacked {len(all_card_data)} cards into a stack.", 3000
+        )
+
+    def _on_custom_deck_from_selection(self) -> None:
+        """Build a real deck from the current selection: cloned cards, optional duplicates."""
+        sel = self._scene.selectedItems()
+        sel_cards = [i for i in sel if isinstance(i, CardItem)]
+        sel_decks = [i for i in sel if isinstance(i, DeckItem)]
+
+        all_card_data: list = [ci.card_data for ci in sel_cards]
+        for di in sel_decks:
+            all_card_data.extend(list(di.deck_model.cards))
+
+        if not all_card_data:
+            return
+
+        # Need either 2+ top-level picks or a single non-empty pile (e.g. one stack)
+        if len(sel_cards) + len(sel_decks) < 2 and not (
+            len(sel_cards) == 0 and len(sel_decks) == 1
+        ):
+            return
+
+        name, ok = QInputDialog.getText(
+            self,
+            "Custom Deck",
+            "Name for the new deck:",
+            text="Custom deck",
+        )
+        if not ok or not name.strip():
+            return
+
+        self._push_undo()
+
+        fu = sum(1 for ci in sel_cards if ci.face_up) + sum(1 for di in sel_decks if di.face_up)
+        majority_face_up = fu >= (len(sel_cards) + len(sel_decks)) / 2
+
+        back_path = ""
+        for ci in sel_cards:
+            if ci.card_data.back_path:
+                back_path = ci.card_data.back_path
+                break
+        if not back_path:
+            for di in sel_decks:
+                if di.deck_model.back_path:
+                    back_path = di.deck_model.back_path
+                    break
+
+        all_items = sel_cards + sel_decks
+        cx = sum(i.scenePos().x() for i in all_items) / len(all_items)
+        cy = sum(i.scenePos().y() for i in all_items) / len(all_items)
+        centre = QPointF(cx, cy)
+
+        for ci in sel_cards:
+            self._canvas_cards.pop(ci.card_data.id, None)
+            self._scene.removeItem(ci)
+        for di in sel_decks:
+            self._scene.removeItem(di)
+            self._deck_items.pop(di.deck_model.id, None)
+            self._deck_models.pop(di.deck_model.id, None)
+
+        import uuid
+        new_id = str(uuid.uuid4())
+        cloned = [clone_card_for_deck(c, new_id) for c in all_card_data]
+
+        custom_dm = DeckModel(folder_path=None, name=name.strip(), deck_id=new_id)
+        custom_dm.back_path = back_path
+        custom_dm.all_cards = cloned
+        custom_dm.cards = list(cloned)
+
+        di = DeckItem(custom_dm)
+        di.is_stack = False
+        di.face_up = majority_face_up
+        di.setPos(centre)
+        di.grid_snap = self._settings.canvas("grid_snap")
+        di.grid_size = self._settings.canvas("grid_size")
+        self._connect_deck_item(di)
+
+        self._scene.addItem(di)
+        self._deck_items[custom_dm.id] = di
+        self._deck_models[custom_dm.id] = custom_dm
+        self._status.showMessage(
+            f"Created deck “{name.strip()}” with {len(cloned)} card(s).", 4000
         )
 
     # ------------------------------------------------------------------
@@ -1539,11 +1665,12 @@ class MainWindow(QMainWindow):
         item.card_hovered.connect(self._on_card_hovered)
         item.card_unhovered.connect(self._on_card_unhovered)
         item.stack_requested.connect(self._on_stack_requested)
+        item.custom_deck_requested.connect(self._on_custom_deck_from_selection)
         item.copy_requested.connect(self._copy_selected)
         item.delete_requested.connect(self._on_card_delete)
         item.delete_selected_requested.connect(self._delete_selected)
         self._scene.addItem(item)
-        self._canvas_cards[card_data.image_path] = item
+        self._canvas_cards[card_data.id] = item
         return item
 
     # ------------------------------------------------------------------
@@ -1581,7 +1708,7 @@ class MainWindow(QMainWindow):
                 rotation  = item.rotation() if item.rotation() != 0 else (
                     180.0 if getattr(card_data, "reversed", False) else 0.0
                 )
-                self._canvas_cards.pop(card_data.image_path, None)
+                self._canvas_cards.pop(card_data.id, None)
                 self._scene.removeItem(item)
                 self._hand.add_card(card_data, face_up=face_up, rotation=rotation)
             elif isinstance(item, DeckItem):
@@ -1599,14 +1726,20 @@ class MainWindow(QMainWindow):
         if not items:
             return
         self._push_undo()
+        reparent = (
+            not target_deck.is_stack
+            and target_deck.deck_model.folder_path is None
+        )
         for item in items:
             if isinstance(item, CardItem):
-                self._canvas_cards.pop(item.card_data.image_path, None)
+                self._canvas_cards.pop(item.card_data.id, None)
                 self._scene.removeItem(item)
-                target_deck.receive_card(item.card_data)
+                target_deck.receive_card(
+                    item.card_data, reparent_into_custom=reparent
+                )
             elif isinstance(item, DeckItem):
                 for card in list(item.deck_model.cards):
-                    target_deck.receive_card(card)
+                    target_deck.receive_card(card, reparent_into_custom=reparent)
                 self._scene.removeItem(item)
                 self._deck_items.pop(item.deck_model.id, None)
                 self._deck_models.pop(item.deck_model.id, None)
@@ -1615,14 +1748,14 @@ class MainWindow(QMainWindow):
 
     def _on_card_send_to_hand(self, card_data: CardData) -> None:
         self._push_undo()
-        item = self._canvas_cards.pop(card_data.image_path, None)
+        item = self._canvas_cards.pop(card_data.id, None)
         if item:
             self._scene.removeItem(item)
         self._hand.add_card(card_data, face_up=True)
 
     def _on_card_return_to_deck(self, card_data: CardData) -> None:
         self._push_undo()
-        item = self._canvas_cards.pop(card_data.image_path, None)
+        item = self._canvas_cards.pop(card_data.id, None)
         if item:
             self._scene.removeItem(item)
         dm = self._deck_models.get(card_data.deck_id)
@@ -1684,8 +1817,11 @@ class MainWindow(QMainWindow):
         rotation   = card_dict.get("rotation", 0.0)
 
         dm = self._deck_models.get(deck_id)
+        cid = card_dict.get("card_id")
         card_data: Optional[CardData] = None
-        if dm:
+        if dm and cid:
+            card_data = dm.card_by_id(cid)
+        if card_data is None and dm:
             card_data = dm.card_by_image_path(image_path)
         if card_data is None:
             from .models import CardData as _CD
@@ -1698,7 +1834,10 @@ class MainWindow(QMainWindow):
                 name=Path(image_path).stem if image_path else "?",
             )
 
-        self._hand.remove_card_by_image_path(image_path)
+        if cid:
+            self._hand.remove_card_by_id(cid)
+        else:
+            self._hand.remove_card_by_image_path(image_path)
 
         item = self._create_card_item(card_data, face_up=face_up)
         item.setPos(scene_pos)
@@ -1716,8 +1855,11 @@ class MainWindow(QMainWindow):
             rotation   = card_dict.get("rotation", 0.0)
 
             dm = self._deck_models.get(deck_id)
+            cid = card_dict.get("card_id")
             card_data: Optional[CardData] = None
-            if dm:
+            if dm and cid:
+                card_data = dm.card_by_id(cid)
+            if card_data is None and dm:
                 card_data = dm.card_by_image_path(image_path)
             if card_data is None:
                 from .models import CardData as _CD
@@ -1834,7 +1976,7 @@ class MainWindow(QMainWindow):
         for item in list(self._scene.items()):
             if isinstance(item, CardItem):
                 if item.card_data.deck_id in deck_ids:
-                    self._canvas_cards.pop(item.card_data.image_path, None)
+                    self._canvas_cards.pop(item.card_data.id, None)
                     self._scene.removeItem(item)
 
         # Handle hand cards
@@ -2016,14 +2158,30 @@ class MainWindow(QMainWindow):
             self._scene.addItem(di)
             self._deck_items[dm.id] = di
 
-        card_lookup: Dict[str, CardData] = {}
+        from collections import defaultdict
+        by_deck_and_id: Dict[tuple, CardData] = {}
+        path_queue: Dict[tuple, list] = defaultdict(list)
         for dm in self._deck_models.values():
             for c in dm.all_cards:
-                card_lookup[c.image_path] = c
+                by_deck_and_id[(dm.id, c.id)] = c
+                path_queue[(dm.id, c.image_path)].append(c)
+
+        def _resolve_card(deck_id: str, img_path: str, card_id: Optional[str]):
+            if card_id and deck_id:
+                hit = by_deck_and_id.get((deck_id, card_id))
+                if hit is not None:
+                    return hit
+            if deck_id and img_path:
+                q = path_queue.get((deck_id, img_path))
+                if q:
+                    return q.pop(0)
+            return None
 
         for cd in data.get("canvas_cards", []):
             img_path = cd.get("image_path", "")
-            card_data = card_lookup.get(img_path)
+            deck_id = cd.get("deck_id", "")
+            cid = cd.get("card_id")
+            card_data = _resolve_card(deck_id, img_path, cid)
             if card_data is None:
                 continue
             item = self._create_card_item(card_data, face_up=cd.get("face_up", True))
@@ -2038,7 +2196,9 @@ class MainWindow(QMainWindow):
 
         for hd in data.get("hand_cards", []):
             img_path = hd.get("image_path", "")
-            card_data = card_lookup.get(img_path)
+            deck_id = hd.get("deck_id", "")
+            cid = hd.get("card_id")
+            card_data = _resolve_card(deck_id, img_path, cid)
             if card_data:
                 self._hand.add_card(
                     card_data,
@@ -2251,7 +2411,7 @@ class MainWindow(QMainWindow):
         dm = self._deck_models.get(item.card_data.deck_id)
         if dm:
             dm.deleted_card_ids.add(item.card_data.id)
-        self._canvas_cards.pop(item.card_data.image_path, None)
+        self._canvas_cards.pop(item.card_data.id, None)
         self._scene.removeItem(item)
 
     def _on_deck_delete(self, di: DeckItem) -> None:
@@ -2326,7 +2486,10 @@ class MainWindow(QMainWindow):
             if t == "card":
                 dm = self._deck_models.get(s.get("deck_id"))
                 if dm:
-                    cd = dm.card_by_image_path(s["image_path"])
+                    cid = s.get("card_id")
+                    cd = dm.card_by_id(cid) if cid else None
+                    if cd is None:
+                        cd = dm.card_by_image_path(s["image_path"])
                     if cd is None:
                         continue
                     item = CardItem(cd, face_up=s.get("face_up", True))
@@ -2339,12 +2502,15 @@ class MainWindow(QMainWindow):
                     item.card_hovered.connect(self._on_card_hovered)
                     item.card_unhovered.connect(self._on_card_unhovered)
                     item.stack_requested.connect(self._on_stack_requested)
+                    item.custom_deck_requested.connect(
+                        self._on_custom_deck_from_selection
+                    )
                     item.copy_requested.connect(self._copy_selected)
                     item.delete_requested.connect(self._on_card_delete)
                     item.delete_selected_requested.connect(self._delete_selected)
                     item.setPos(QPointF(s["x"], s["y"]) + offset)
                     self._scene.addItem(item)
-                    self._canvas_cards[cd.image_path] = item
+                    self._canvas_cards[cd.id] = item
                     item.setSelected(True)
             elif t == "image":
                 item = ImageItem(
@@ -2377,6 +2543,7 @@ class MainWindow(QMainWindow):
                 new_state = dict(s)
                 new_state["id"] = str(_uuid.uuid4())
                 new_dm = DeckModel.from_dict(new_state)
+                new_dm.bind_cards_to_self()
                 new_di = DeckItem(new_dm)
                 new_di.face_up          = s.get("face_up", False)
                 new_di.is_stack         = s.get("is_stack", False)
@@ -2453,7 +2620,7 @@ class MainWindow(QMainWindow):
                 dm = self._deck_models.get(item.card_data.deck_id)
                 if dm:
                     dm.deleted_card_ids.add(item.card_data.id)
-                self._canvas_cards.pop(item.card_data.image_path, None)
+                self._canvas_cards.pop(item.card_data.id, None)
                 self._scene.removeItem(item)
             elif isinstance(item, DeckItem):
                 deck_id = item.deck_model.id

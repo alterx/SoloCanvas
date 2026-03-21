@@ -52,6 +52,7 @@ class CardItem(QGraphicsObject):
     card_hovered     = pyqtSignal(object)   # CardData
     card_unhovered   = pyqtSignal()
     stack_requested  = pyqtSignal()        # emitted when "Stack Selected" is chosen
+    custom_deck_requested = pyqtSignal()   # create a new deck from selection (cloned cards)
     copy_requested   = pyqtSignal()        # emitted when "Copy" is chosen
     delete_requested          = pyqtSignal(object)  # emits self when "Delete" is chosen
     delete_selected_requested = pyqtSignal()        # delete all selected items
@@ -378,10 +379,20 @@ class CardItem(QGraphicsObject):
             menu.addAction("Return to Deck", lambda: self.return_to_deck.emit(self.card_data))
             menu.addSeparator()
 
-        # Stack option — visible when 2+ cards/stacks are selected
+        # Stack (2+ top-level items) / custom deck (same, or one pile only — deck menu usually)
         total_sel = len(sel_cards) + len(sel_decks)
-        if total_sel >= 2:
-            menu.addAction(f"Stack {total_sel} Selected Items", self.stack_requested.emit)
+        n_cards_in_sel = len(sel_cards) + sum(d.deck_model.count for d in sel_decks)
+        one_pile_only = len(sel_cards) == 0 and len(sel_decks) == 1
+        show_stack = total_sel >= 2
+        show_custom_deck = show_stack or (one_pile_only and n_cards_in_sel >= 1)
+        if show_stack or show_custom_deck:
+            if show_stack:
+                menu.addAction(f"Stack {total_sel} Selected Items", self.stack_requested.emit)
+            if show_custom_deck:
+                menu.addAction(
+                    f"Create custom deck ({n_cards_in_sel} cards)…",
+                    self.custom_deck_requested.emit,
+                )
             menu.addSeparator()
 
         # Lock — majority state when multi
@@ -486,6 +497,7 @@ class CardItem(QGraphicsObject):
         return {
             "image_path": self.card_data.image_path,
             "deck_id":    self.card_data.deck_id,
+            "card_id":    self.card_data.id,
             "x":          self.pos().x(),
             "y":          self.pos().y(),
             "rotation":   self.rotation(),

@@ -100,12 +100,13 @@ dist\SoloCanvas\SoloCanvas.exe
 
 ### Cards & Decks
 
-- **Deck Library** — load image-based decks from the `Decks\` folder; double-click to place on canvas
+- **Deck Library** — **Image folders** tab: decks from the `Decks\` folder; **Saved custom** tab: decks you stored from the canvas (`Save to Deck Library` on a custom deck), persisted under your SoloCanvas app data; **Add to Canvas** places a fresh copy in the current session
 - **Drawing cards** — hover over a deck and press a number key to draw to hand; `Shift`+number draws directly to the canvas
 - **Flip** — flip any card or deck face-up / face-down individually or in bulk
 - **Shuffle** — shuffle any deck or stack; animates with a shake
 - **Card Picker** — search cards by name, drag to reorder the deck, split at a selected card, reset or shuffle order, adjust thumbnail size
 - **Card stacking** — select multiple cards and/or decks and stack them into a new deck-like stack (`Ctrl+G`); disband a stack to return cards to their original decks
+- **Custom deck** — right-click and choose **Create custom deck…** with several spread cards and/or decks selected, or with **a single stack or deck** selected (uses every card in that pile); builds a normal deck from copies (duplicates allowed); draw, shuffle, search, and return-to-deck all use this deck, not the originals; **Save to Deck Library…** keeps a snapshot in the library’s Saved custom tab for other sessions
 - **Spread** — spread a deck's cards horizontally on the canvas (`Ctrl+Shift+G`)
 - **Recall** — return canvas cards to their decks via the Recall dialog (`Ctrl+R`)
 - **Hand strip** — persistent card hand at the bottom of the window; drag cards to canvas, reorder within hand, multi-select, return to deck
