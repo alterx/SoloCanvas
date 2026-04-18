@@ -17,20 +17,20 @@
 from __future__ import annotations
 
 import math
-from typing import Optional
+import random
 
 from PyQt6.QtCore import (
     QAbstractAnimation, QEasingCurve, QPointF, QPropertyAnimation,
     QRectF, Qt, QTimer, pyqtProperty, pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QColor, QPainter, QPen, QPixmap,
+    QColor, QPainter, QPen,
 )
 from PyQt6.QtWidgets import (
     QGraphicsDropShadowEffect, QGraphicsItem, QGraphicsObject, QMenu,
 )
 
-from .dice_manager import DIE_MAX, DIE_TYPES, DiceSetsManager, face_values, roll_value
+from .dice_manager import DIE_MAX, DiceSetsManager, face_values, roll_value
 
 
 class DieItem(QGraphicsObject):
@@ -296,7 +296,7 @@ class DieItem(QGraphicsObject):
         # Avoid same face twice in a row when there are choices
         if len(faces) > 1:
             while new_val == self.value:
-                new_val = faces[__import__("random").randrange(len(faces))]
+                new_val = faces[random.randrange(len(faces))]
         self._prev_value = self.value
         self.value = new_val
 
@@ -399,6 +399,24 @@ class DieItem(QGraphicsObject):
             self.rolled.emit(self, self._final_value)
         else:
             self._log_individual = True
+
+    def set_face(self, value: int) -> None:
+        """Display a specific face value immediately (no roll animation).
+
+        No-op while a roll or flip animation is running — the animation owns
+        the face during that time and would override the change anyway.
+        """
+        from PyQt6.QtCore import QAbstractAnimation
+        if (self._roll_anim.state() == QAbstractAnimation.State.Running or
+                self._flip_anim.state() == QAbstractAnimation.State.Running):
+            return
+        self._prev_value = self.value
+        self.value = value
+        # Short cross-fade (same 15 ms used during roll cycling) for visual feedback
+        self._face_fade_val = 0.0
+        self._fade_anim.stop()
+        self._fade_anim.start()
+        self.update()
 
     def reset_value(self) -> None:
         """Reset to the maximum (default) face value."""

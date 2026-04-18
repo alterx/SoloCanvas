@@ -21,14 +21,16 @@ from typing import Optional
 
 from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import (
-    QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap,
-    QRadialGradient, QTransform,
+    QColor, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap,
+    QTransform,
 )
 from PyQt6.QtWidgets import QGraphicsItem, QGraphicsScene, QMenu
 
 from .image_item import _is_image_path
 
 _IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tiff', '.tif', '.webp'}
+
+_SCENE_RECT = QRectF(-8000, -8000, 16000, 16000)
 
 
 def _is_image_url(url) -> bool:
@@ -48,7 +50,7 @@ class GridLayer(QGraphicsItem):
         self.setAcceptHoverEvents(False)
 
     def boundingRect(self) -> QRectF:
-        return QRectF(-8000, -8000, 16000, 16000)
+        return _SCENE_RECT
 
     def shape(self) -> QPainterPath:
         return QPainterPath()  # empty – never hit-tested by itemAt()
@@ -96,7 +98,7 @@ class CanvasScene(QGraphicsScene):
         self.snap_mode:    str  = settings.canvas("grid_snap_mode")  # "lines" | "centered"
 
         # Very large scene rect for the "infinite" canvas feel
-        self.setSceneRect(-8000, -8000, 16000, 16000)
+        self.setSceneRect(_SCENE_RECT)
 
         self.setItemIndexMethod(QGraphicsScene.ItemIndexMethod.NoIndex)
 

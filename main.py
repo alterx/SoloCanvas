@@ -58,7 +58,7 @@ def _qt_exception_hook(exc_type, exc_value, exc_tb):
 # ── App entry point ────────────────────────────────────────────────────────────
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtGui import QIcon
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QLoggingCategory
 from src.main_window import MainWindow
 
 
@@ -69,6 +69,9 @@ def main():
         f.write(f"START  {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
 
     app = QApplication(sys.argv)
+    # Suppress Qt's internal warnings about malformed PDF bookmark destinations.
+    # These come from corrupt zoom/location data in some PDFs and are harmless.
+    QLoggingCategory.setFilterRules("qt.pdf.bookmarks=false")
     app.setApplicationName("SoloCanvas")
     app.setOrganizationName("SoloCanvas")
     app.setStyle("Fusion")

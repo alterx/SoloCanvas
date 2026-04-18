@@ -16,10 +16,8 @@
 """DeckItem – a deck of cards on the canvas with pseudo-3D rendering."""
 from __future__ import annotations
 
-import math
-import random
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional
+from typing import Optional
 
 from PyQt6.QtCore import (
     QAbstractAnimation, QEasingCurve, QPointF, QRectF,

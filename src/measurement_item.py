@@ -23,7 +23,7 @@ from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QBrush, QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen,
 )
-from PyQt6.QtWidgets import QGraphicsItem, QGraphicsObject
+from PyQt6.QtWidgets import QGraphicsItem, QGraphicsObject, QMenu
 
 # ---------------------------------------------------------------------------
 # Visual constants
@@ -123,7 +123,7 @@ class MeasurementItem(QGraphicsObject):
     delete_requested  emitted when user selects "Delete" from the context menu.
     """
 
-    delete_requested = pyqtSignal()
+    delete_requested = pyqtSignal(object)
 
     def __init__(
         self,
@@ -492,6 +492,15 @@ class MeasurementItem(QGraphicsObject):
         painter.setFont(font)
         painter.setPen(QPen(_C_DIM_TEXT))
         painter.drawText(QPointF(lx, ly + 2), text)
+
+    def contextMenuEvent(self, event) -> None:
+        if self._active:
+            return
+        menu = QMenu()
+        delete_action = menu.addAction("Delete")
+        action = menu.exec(event.screenPos().toPoint())
+        if action is delete_action:
+            self.delete_requested.emit(self)
 
     # ------------------------------------------------------------------
     # Session persistence helpers

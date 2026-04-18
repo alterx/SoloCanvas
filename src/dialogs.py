@@ -18,16 +18,16 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, List, Optional
 
 from PyQt6.QtCore import Qt, QEasingCurve, QPropertyAnimation, QSize, QTimer, pyqtProperty, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QFont, QIcon, QKeySequence, QPainter, QPainterPath, QPixmap, QTransform
+from PyQt6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPainterPath, QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
-    QDoubleSpinBox, QFileDialog, QFontComboBox, QFormLayout, QGroupBox,
+    QDoubleSpinBox, QFileDialog, QFontComboBox, QFormLayout,
     QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton,
-    QScrollArea, QSlider, QSizePolicy, QSpinBox, QSplitter, QStackedWidget,
+    QScrollArea, QSlider, QSpinBox,
     QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -1648,23 +1648,35 @@ class HotkeyReferenceDialog(QDialog):
             QHeaderView::section { font-weight: bold; padding: 5px 8px; }
         """)
 
-        rows = []
-
-        # Configurable hotkeys from settings
+        configurable = []
         for action, label in HOTKEY_LABELS.items():
             key = self._settings.hotkey(action)
             if key:
-                rows.append((key, label))
+                configurable.append((key, label))
 
-        # Non-keyboard actions (mouse gestures etc.) and fixed system keys
+        # Fixed system / mouse bindings (not rebindable)
         fixed = [
+            ("Space",             "Pan canvas (hold) / measurement waypoint"),
             ("F11",               "Toggle fullscreen"),
+            ("Scroll wheel",      "Zoom in / out"),
+            ("Middle mouse drag", "Pan canvas"),
             ("Drag card → deck",  "Merge card into deck"),
         ]
-        rows.extend(fixed)
 
-        table.setRowCount(len(rows))
-        for i, (key, action) in enumerate(rows):
+        all_rows = configurable + [None] + fixed
+
+        table.setRowCount(len(all_rows))
+        for i, row in enumerate(all_rows):
+            if row is None:
+                # Section header row
+                header_item = QTableWidgetItem("── Mouse & Fixed Keys ──")
+                header_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                header_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                header_item.setForeground(QColor("#888888"))
+                table.setItem(i, 0, header_item)
+                table.setSpan(i, 0, 1, 2)
+                continue
+            key, action = row
             key_item = QTableWidgetItem(key)
             key_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             table.setItem(i, 0, key_item)

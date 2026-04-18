@@ -10,17 +10,23 @@ echo.
 set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
 
-:: Locate Python 3 on PATH
+:: Prefer the project's .venv (where all dependencies including pymupdf are
+:: installed).  Fall back to the first Python 3 found on PATH.
 set PYTHON=
-for %%C in (python3.exe python.exe) do (
-    if not defined PYTHON (
-        for /f "delims=" %%P in ('where %%C 2^>nul') do (
-            if not defined PYTHON (
-                echo %%P | findstr /i "WindowsApps" >nul 2>&1
-                if errorlevel 1 (
-                    for /f "tokens=2 delims= " %%V in ('"%%P" --version 2^>^&1') do (
-                        for /f "tokens=1 delims=." %%M in ("%%V") do (
-                            if "%%M"=="3" set PYTHON=%%P
+if exist "%ROOT%\.venv\Scripts\python.exe" (
+    set "PYTHON=%ROOT%\.venv\Scripts\python.exe"
+    echo Using project virtual environment: %ROOT%\.venv
+) else (
+    for %%C in (python3.exe python.exe) do (
+        if not defined PYTHON (
+            for /f "delims=" %%P in ('where %%C 2^>nul') do (
+                if not defined PYTHON (
+                    echo %%P | findstr /i "WindowsApps" >nul 2>&1
+                    if errorlevel 1 (
+                        for /f "tokens=2 delims= " %%V in ('"%%P" --version 2^>^&1') do (
+                            for /f "tokens=1 delims=." %%M in ("%%V") do (
+                                if "%%M"=="3" set PYTHON=%%P
+                            )
                         )
                     )
                 )
@@ -30,10 +36,9 @@ for %%C in (python3.exe python.exe) do (
 )
 
 if not defined PYTHON (
-    echo [ERROR] Python 3 not found on PATH.
+    echo [ERROR] Python 3 not found on PATH and no .venv found.
     echo.
-    echo Please install Python 3 from https://www.python.org/downloads/
-    echo Make sure to check "Add Python to PATH" during installation.
+    echo Run launch.bat first to create the virtual environment, then retry.
     pause
     exit /b 1
 )
@@ -42,13 +47,9 @@ for /f "tokens=2 delims= " %%V in ('"%PYTHON%" --version 2^>^&1') do set PYVER=%
 echo Found Python %PYVER%  (%PYTHON%)
 echo.
 
-:: Derive pip from the same directory as python
-for /f "delims=" %%D in ("%PYTHON%") do set PYDIR=%%~dpD
-set PIP=%PYDIR%pip.exe
-
 :: Ensure PyInstaller is installed in the correct Python environment
 echo Installing/verifying PyInstaller...
-%PIP% install pyinstaller
+"%PYTHON%" -m pip install pyinstaller
 if errorlevel 1 (
     echo [ERROR] Failed to install PyInstaller.
     pause
@@ -67,7 +68,7 @@ if exist "build\SoloCanvas" (
 echo Building SoloCanvas...
 echo.
 
-%PYTHON% -m PyInstaller ^
+"%PYTHON%" -m PyInstaller ^
     --noconfirm ^
     --windowed ^
     --onedir ^
@@ -82,6 +83,11 @@ echo.
     --hidden-import "PyQt6.QtPdfWidgets" ^
     --collect-all qtawesome ^
     --collect-all markdown ^
+    --collect-all markdownify ^
+    --collect-all pymupdf ^
+    --hidden-import "fitz" ^
+    --hidden-import "pymupdf" ^
+    --hidden-import "bs4" ^
     main.py
 
 if errorlevel 1 (
@@ -98,17 +104,12 @@ xcopy /e /i /y "%ROOT%\Dice" "dist\SoloCanvas\Dice" >nul
 echo Copying resources...
 xcopy /e /i /y "%ROOT%\resources" "dist\SoloCanvas\resources" >nul
 
-:: Create the Decks folder next to the exe (users populate this with their own decks)
-if not exist "dist\SoloCanvas\Decks" (
-    mkdir "dist\SoloCanvas\Decks"
-    echo Created dist\SoloCanvas\Decks\
-)
+:: Copy Decks and Images folders next to the exe
+echo Copying Decks...
+xcopy /e /i /y "%ROOT%\Decks" "dist\SoloCanvas\Decks" >nul
 
-:: Create the Images folder next to the exe (user image library)
-if not exist "dist\SoloCanvas\Images" (
-    mkdir "dist\SoloCanvas\Images"
-    echo Created dist\SoloCanvas\Images\
-)
+echo Copying Images...
+xcopy /e /i /y "%ROOT%\Images" "dist\SoloCanvas\Images" >nul
 
 :: Create the Notes folder next to the exe (global Markdown notepad storage)
 if not exist "dist\SoloCanvas\Notes" (

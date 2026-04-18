@@ -16,22 +16,20 @@
 """MainWindow – orchestrates the entire SoloCanvas application."""
 from __future__ import annotations
 
-import json
 import shutil
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer
+from PyQt6.QtCore import QPointF, Qt, QTimer
 from PyQt6.QtGui import (
-    QAction, QActionGroup, QCloseEvent, QColor, QFont, QIcon,
-    QKeySequence, QPainter, QPen, QPixmap,
+    QAction, QActionGroup, QCloseEvent, QColor, QFont,
+    QKeySequence, QPainter, QPainterPath, QPen, QPixmap,
 )
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QInputDialog, QLabel,
-    QMainWindow, QMenu, QMessageBox,
+    QMainWindow, QMessageBox,
     QStatusBar, QVBoxLayout, QWidget,
 )
-from PyQt6.QtGui import QShortcut
 
 from .canvas_scene   import CanvasScene
 from .canvas_view    import CanvasView
@@ -45,11 +43,10 @@ from .dialogs        import (
     RollLogDialog, SessionPickerDialog, SettingsDialog, StartupDialog,
 )
 from .measurement_item import MeasurementItem
-from .drawing_item import DrawingStrokeItem, DrawingShapeItem, make_smooth_path
 from .drawing_settings_dialog import DrawingSettingsDialog
 from .image_item     import ImageItem
 from .die_item       import DieItem
-from .dice_manager   import DiceSetsManager
+from .dice_manager   import DiceSetsManager, face_values
 from .hand_widget    import HandWidget, _HAND_MARGIN_BOTTOM
 from .models         import CardData, DeckModel
 from .session_manager  import SessionManager
@@ -379,8 +376,10 @@ class MainWindow(QMainWindow):
 
         # Edit
         edit_menu = mb.addMenu("&Edit")
-        self._undo_action = act(edit_menu, "Undo",  self._undo, "Ctrl+Z")
-        self._redo_action = act(edit_menu, "Redo",  self._redo, "Ctrl+Shift+Z")
+        self._undo_action = act(edit_menu, "Undo",  self._undo,
+                                self._settings.hotkey("undo"))
+        self._redo_action = act(edit_menu, "Redo",  self._redo,
+                                self._settings.hotkey("redo"))
         self._undo_action.setEnabled(False)
         self._redo_action.setEnabled(False)
         edit_menu.addSeparator()
@@ -562,19 +561,32 @@ class MainWindow(QMainWindow):
                     die.roll()
 
         elif key_str in [s.hotkey(f"draw_{n}") for n in range(1, 10)]:
-            # Only draw when the cursor is hovering over a deck or stack
-            from PyQt6.QtGui import QCursor
-            vp_pos = self._view.mapFromGlobal(QCursor.pos())
-            scene_pos = self._view.mapToScene(vp_pos)
-            hovered_deck = next(
-                (it for it in self._scene.items(scene_pos) if isinstance(it, DeckItem)),
-                None,
-            )
-            if hovered_deck:
-                for n in range(1, 10):
-                    if key_str == s.hotkey(f"draw_{n}"):
-                        hovered_deck.draw_cards_to_hand(n)  # before_draw signal pushes undo
-                        break
+            # Die face takes priority: if a die is targeted, treat the digit as
+            # a face-set command instead of a card-draw command.
+            die_targets = self._get_die_targets()
+            if die_targets and len(key_str) == 1 and key_str.isdigit():
+                # Treat the digit as a 1-based face index so that d100 maps
+                # correctly: 1→10, 2→20, … 9→90.  For standard dice the index
+                # equals the face value, so behaviour is unchanged for them.
+                idx = int(key_str) - 1   # "1"→0, "2"→1, … "9"→8
+                self._push_undo()
+                for die in die_targets:
+                    faces = face_values(die.die_type)
+                    die.set_face(faces[min(idx, len(faces) - 1)])
+            else:
+                # No die targeted — draw cards from hovered deck as normal
+                from PyQt6.QtGui import QCursor
+                vp_pos = self._view.mapFromGlobal(QCursor.pos())
+                scene_pos = self._view.mapToScene(vp_pos)
+                hovered_deck = next(
+                    (it for it in self._scene.items(scene_pos) if isinstance(it, DeckItem)),
+                    None,
+                )
+                if hovered_deck:
+                    for n in range(1, 10):
+                        if key_str == s.hotkey(f"draw_{n}"):
+                            hovered_deck.draw_cards_to_hand(n)  # before_draw signal pushes undo
+                            break
 
         elif key_str == s.hotkey("send_to_back"):
             # Send hovered or selected items to the bottom of the Z stack
@@ -663,6 +675,38 @@ class MainWindow(QMainWindow):
             self._open_image_library()
         elif key_str == s.hotkey("open_dice_bag"):
             self._open_dice_library()
+
+        # ── Die face hotkeys ──────────────────────────────────────────────────
+
+        elif len(key_str) == 1 and key_str.isdigit():
+            # Handles "0" only — "1"–"9" are intercepted by the draw_N block above.
+            # "0" is the 10th face index (d10→10, d100→100, d6→capped at 6, etc.)
+            targets = self._get_die_targets()
+            if targets:
+                self._push_undo()
+                for die in targets:
+                    faces = face_values(die.die_type)
+                    die.set_face(faces[min(9, len(faces) - 1)])
+
+        elif key_str == s.hotkey("die_face_prev"):
+            # Decrement displayed value by 1, wrapping min → max.
+            targets = self._get_die_targets()
+            if targets:
+                self._push_undo()
+                for die in targets:
+                    faces = face_values(die.die_type)
+                    idx   = faces.index(die.value) if die.value in faces else 0
+                    die.set_face(faces[(idx - 1) % len(faces)])
+
+        elif key_str == s.hotkey("die_face_next"):
+            # Increment displayed value by 1, wrapping max → min.
+            targets = self._get_die_targets()
+            if targets:
+                self._push_undo()
+                for die in targets:
+                    faces = face_values(die.die_type)
+                    idx   = faces.index(die.value) if die.value in faces else 0
+                    die.set_face(faces[(idx + 1) % len(faces)])
 
     def _dispatch_key_release(self, key_str: str) -> None:
         if key_str != self._settings.hotkey("shuffle"):
@@ -964,6 +1008,29 @@ class MainWindow(QMainWindow):
         if next_y + step > top_left.y() + vp_height:
             self._dice_cascade_row = 0
             self._dice_cascade_col += 1
+
+    def _get_die_targets(self) -> List[DieItem]:
+        """Return the dice that keyboard value commands should operate on.
+
+        Rules (Option B):
+        - A die is hovered if the mouse cursor is over it in the scene.
+        - If a die is hovered AND is in the current selection → operate on all
+          selected dice (the hover confirms intent for the whole group).
+        - If a die is hovered AND is NOT in the current selection → operate on
+          that die alone.
+        - If nothing is hovered → operate on all selected dice.
+        """
+        from PyQt6.QtGui import QCursor
+        vp_pos    = self._view.mapFromGlobal(QCursor.pos())
+        scene_pos = self._view.mapToScene(vp_pos)
+        hovered   = next(
+            (it for it in self._scene.items(scene_pos) if isinstance(it, DieItem)),
+            None,
+        )
+        selected = [i for i in self._scene.selectedItems() if isinstance(i, DieItem)]
+        if hovered is not None:
+            return selected if hovered in selected else [hovered]
+        return selected
 
     def _connect_die_item(self, di: DieItem) -> None:
         di.delete_requested.connect(self._on_die_delete)
@@ -1867,7 +1934,12 @@ class MainWindow(QMainWindow):
             drawing_items=self._drawing_items,
             sticky_notes=self._sticky_notes,
         )
-        saved = self._session.save(state, path=path, name=name or path.stem)
+        try:
+            saved = self._session.save(state, path=path, name=name or path.stem)
+        except Exception as exc:
+            QMessageBox.warning(self, "Save Failed",
+                                f"Could not save session:\n{exc}")
+            return
         self._session_path = saved
         self.setWindowTitle(f"SoloCanvas – {saved.stem}")
         self._status.showMessage(f"Session saved: {saved.name}", 3000)
@@ -1973,10 +2045,7 @@ class MainWindow(QMainWindow):
         canvas = data.get("canvas", {})
         if restore_zoom:
             scale = canvas.get("scale", 1.0)
-            self._view.reset_zoom()
-            if scale != 1.0:
-                self._view.scale(scale, scale)
-                self._view._scale = scale
+            self._view.restore_zoom(scale)
 
         bg = canvas.get("background", {})
         if bg:
@@ -2028,9 +2097,7 @@ class MainWindow(QMainWindow):
             self._connect_image_item(item)
             self._scene.addItem(item)
             if img_dict.get("is_anchor", False):
-                item.is_anchor = True
-                item._shadow.setEnabled(False)
-                item.setFlag(item.GraphicsItemFlag.ItemIsSelectable, False)
+                item.set_anchor(True)
             self._image_items.append(item)
             if img_dict.get("minimap", False):
                 self._open_minimap(item, geometry=item.minimap_geo)
@@ -2053,14 +2120,15 @@ class MainWindow(QMainWindow):
             if mi.scene():
                 self._scene.removeItem(mi)
         self._frozen_measurements.clear()
+        _load_failures = 0
         for md in data.get("measurements", []):
             try:
                 item = MeasurementItem.from_dict(md)
                 self._scene.addItem(item)
-                item.delete_requested.connect(lambda i=item: self._remove_measurement(i))
+                item.delete_requested.connect(self._remove_measurement)
                 self._frozen_measurements.append(item)
             except Exception:
-                pass
+                _load_failures += 1
 
         # Restore drawing items
         self._drawing_items.clear()
@@ -2078,7 +2146,7 @@ class MainWindow(QMainWindow):
                     self._scene.addItem(item)
                     self._drawing_items.append(item)
             except Exception:
-                pass
+                _load_failures += 1
 
         # Restore sticky notes
         self._sticky_notes.clear()
@@ -2096,7 +2164,13 @@ class MainWindow(QMainWindow):
                 self._scene.addItem(item)
                 self._sticky_notes.append(item)
             except Exception:
-                pass
+                _load_failures += 1
+
+        if _load_failures:
+            QMessageBox.warning(
+                self, "Session Load Warning",
+                f"{_load_failures} item(s) could not be restored from the session.",
+            )
 
     # ------------------------------------------------------------------
     # Undo / redo
@@ -2105,12 +2179,13 @@ class MainWindow(QMainWindow):
     def _push_undo(self) -> None:
         """Snapshot current state onto the undo stack (configurable max levels)."""
         from .session_manager import SessionManager as _SM
+        # Exclude drawing_items: their serialization is O(n·strokes) and undo
+        # for drawing is handled separately via draw_release boundaries.
         state = _SM.build_state(
             self._view, self._scene, self._hand,
             self._deck_models, self._deck_items,
             die_items=self._die_items,
             image_items=self._image_items,
-            drawing_items=self._drawing_items,
             sticky_notes=self._sticky_notes,
         )
         self._undo_stack.append(state)
@@ -2651,7 +2726,7 @@ class MainWindow(QMainWindow):
         self._active_measurement = None
         item.update_end(scene_pos)
         item.freeze()
-        item.delete_requested.connect(lambda i=item: self._remove_measurement(i))
+        item.delete_requested.connect(self._remove_measurement)
         self._frozen_measurements.append(item)
         self._dim_bubble.hide()
 
@@ -2758,7 +2833,6 @@ class MainWindow(QMainWindow):
             self._active_draw_points = [scene_pos]
             # Create a temporary stroke item to show live feedback
             from .drawing_item import DrawingStrokeItem, make_smooth_path
-            from PyQt6.QtCore import QPointF
             path = make_smooth_path([scene_pos])
             stroke = DrawingStrokeItem(
                 path,
@@ -2792,8 +2866,11 @@ class MainWindow(QMainWindow):
             scene_pos = self._snap_to_grid(scene_pos)
         if sub == "freehand" and self._active_draw_stroke is not None:
             self._active_draw_points.append(scene_pos)
-            from .drawing_item import make_smooth_path
-            path = make_smooth_path(self._active_draw_points)
+            # Use raw lineTo during draw_move for O(n) preview; make_smooth_path
+            # runs only on release so the O(n²) Douglas-Peucker pass fires once.
+            path = QPainterPath(self._active_draw_points[0])
+            for pt in self._active_draw_points[1:]:
+                path.lineTo(pt)
             self._active_draw_stroke._path = path
             self._active_draw_stroke.prepareGeometryChange()
             self._active_draw_stroke.update()
@@ -3009,8 +3086,17 @@ class MainWindow(QMainWindow):
                     autosave_path = self._session.autosave_path()
                     self._session.autosave(state)
                     self._save_screenshot(autosave_path)
-            except Exception:
-                pass
+            except Exception as exc:
+                QMessageBox.warning(
+                    self, "Autosave Failed",
+                    f"Could not save session on close:\n{exc}",
+                )
+        if self._pdf_dlg is not None and self._pdf_dlg.isVisible():
+            self._pdf_dlg.close()
+            if self._pdf_dlg.isVisible():
+                # User cancelled out of a save prompt in the PDF viewer
+                event.ignore()
+                return
         if self._notepad_dlg is not None:
             self._notepad_dlg.save_and_close()
         self._settings.save()

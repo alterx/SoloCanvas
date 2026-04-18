@@ -19,12 +19,12 @@ from __future__ import annotations
 import json
 import random
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QImage, QPainter, QPixmap
+from PyQt6.QtGui import QColor, QPainter, QPixmap
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -277,11 +277,21 @@ class DiceSetsManager:
                 pass
 
     def save_sets(self) -> None:
+        import os
         path = self._save_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         data = [ds.to_dict() for ds in self._sets.values() if not ds.is_builtin]
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        tmp = path.with_suffix(".tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
 
     # ------------------------------------------------------------------
     # Set management

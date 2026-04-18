@@ -33,6 +33,14 @@ Notes/**
 Decks/Mystical Manga Tarot/
 Decks/Wildwood Tarot/
 
+# Session planning / review docs
+pdf_save_plan.md
+Review_Imp.md
+Review_Outline.md
+
+# Temp files from PDF save operations
+*.tmp
+
 # Claude Code
 .claude/
 

@@ -16,10 +16,7 @@
 """CanvasView – QGraphicsView subclass with zoom, pan, and keyboard routing."""
 from __future__ import annotations
 
-import math
-from typing import Optional
-
-from PyQt6.QtCore import QEvent, QPointF, Qt, pyqtSignal
+from PyQt6.QtCore import QPointF, Qt, pyqtSignal
 from PyQt6.QtGui import QCursor, QKeyEvent, QMouseEvent, QSurfaceFormat, QWheelEvent
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 from PyQt6.QtWidgets import QGraphicsView
@@ -142,6 +139,14 @@ class CanvasView(QGraphicsView):
         self._scale = 1.0
         self._update_render_hints()
         self.zoom_changed.emit(1.0)
+
+    def restore_zoom(self, scale: float) -> None:
+        """Restore a saved zoom level (used by session load)."""
+        self.resetTransform()
+        self._scale = scale
+        self.scale(scale, scale)
+        self._update_render_hints()
+        self.zoom_changed.emit(scale)
 
     def center_on_origin(self) -> None:
         self.centerOn(0, 0)
@@ -422,8 +427,10 @@ class CanvasView(QGraphicsView):
             event.accept()
             return
 
-        # M key → toggle measurement mode
-        if event.key() == Qt.Key.Key_M and not event.isAutoRepeat():
+        key_seq = _key_event_to_str(event)
+
+        # Toggle measurement mode
+        if key_seq == self._settings.hotkey("measurement_toggle") and not event.isAutoRepeat():
             self.measurement_active = not self.measurement_active
             if not self.measurement_active:
                 self._measuring = False
@@ -431,12 +438,20 @@ class CanvasView(QGraphicsView):
             event.accept()
             return
 
-        # P key → toggle drawing mode
-        if event.key() == Qt.Key.Key_P and not event.isAutoRepeat():
+        # Toggle drawing mode
+        if key_seq == self._settings.hotkey("drawing_toggle") and not event.isAutoRepeat():
             self.drawing_active = not self.drawing_active
             if not self.drawing_active:
                 self._is_drawing = False
             self.drawing_toggled.emit(self.drawing_active)
+            event.accept()
+            return
+
+        # Die face step — fires once per physical key press, no repeat
+        if key_seq in (self._settings.hotkey("die_face_prev"),
+                       self._settings.hotkey("die_face_next")):
+            if not event.isAutoRepeat():
+                self.key_action.emit(key_seq)
             event.accept()
             return
 

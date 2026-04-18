@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 from PyQt6.QtCore import (
     QAbstractAnimation, QEasingCurve, QPointF, QRectF,
@@ -26,7 +26,6 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QBrush, QColor, QFont, QPainter, QPen, QPixmap,
-    QAction, QCursor,
 )
 from PyQt6.QtWidgets import (
     QGraphicsDropShadowEffect, QGraphicsObject,

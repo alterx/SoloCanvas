@@ -134,6 +134,7 @@ check_pkg "PyQt6"       "PyQt6"
 check_pkg "qtawesome"   "qtawesome"
 check_pkg "markdown"    "markdown"
 check_pkg "markdownify" "markdownify"
+check_pkg "PyMuPDF"     "pymupdf"
 
 if [ "$MISSING" -eq 1 ]; then
     echo

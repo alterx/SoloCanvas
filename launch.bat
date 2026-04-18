@@ -75,6 +75,7 @@ call :check_pkg PyQt6        PyQt6
 call :check_pkg qtawesome    qtawesome
 call :check_pkg markdown     markdown
 call :check_pkg markdownify  markdownify
+call :check_pkg PyMuPDF      pymupdf
 
 if "%MISSING%"=="1" (
     echo.
@@ -105,13 +106,9 @@ if "%MISSING%"=="1" (
 :: ── 4. Launch app (pythonw = no terminal window) ─────────────
 echo.
 echo Launching SoloCanvas...
+echo.
 
-if exist "%PYTHONW%" (
-    start "" "%PYTHONW%" "%ROOT%\main.py"
-) else (
-    start "" /b "%PYTHON%" "%ROOT%\main.py"
-)
-
+start "" "%PYTHONW%" "%ROOT%\main.py"
 exit /b 0
 
 :: ── Helper: check if a package is importable ─────────────────

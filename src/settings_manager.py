@@ -58,8 +58,14 @@ DEFAULT_HOTKEYS: Dict[str, str] = {
     "hotkey_reference":  "K",
     "open_notepad":      "N",
     "open_deck_library": "D",
-    "open_image_library":"I",
-    "open_dice_bag":     "B",
+    "open_image_library":   "I",
+    "open_dice_bag":        "B",
+    "measurement_toggle":   "M",
+    "drawing_toggle":       "P",
+    "die_face_prev":        "[",
+    "die_face_next":        "]",
+    "undo":                 "Ctrl+Z",
+    "redo":                 "Ctrl+Shift+Z",
 }
 
 HOTKEY_LABELS: Dict[str, str] = {
@@ -98,8 +104,14 @@ HOTKEY_LABELS: Dict[str, str] = {
     "hotkey_reference":  "Show hotkey reference",
     "open_notepad":      "Open Notepad",
     "open_deck_library": "Open Deck Library",
-    "open_image_library":"Open Image Library",
-    "open_dice_bag":     "Open Dice Bag",
+    "open_image_library":   "Open Image Library",
+    "open_dice_bag":        "Open Dice Bag",
+    "measurement_toggle":   "Toggle measurement tool",
+    "drawing_toggle":       "Toggle drawing tool",
+    "die_face_prev":        "Die face step backward",
+    "die_face_next":        "Die face step forward",
+    "undo":                 "Undo",
+    "redo":                 "Redo",
 }
 
 DEFAULT_CANVAS: Dict[str, Any] = {
@@ -152,13 +164,15 @@ DEFAULT_PDF: Dict[str, Any] = {
     "last_path":        "",
     "last_pages":       {},   # path → page number
     "recently_used":    [],   # list of {"path": ..., "title": ...}
-    "user_bookmarks":   {},   # path → list of {"page": ..., "label": ...}
+    "user_bookmarks":   {},   # legacy — migrated to pdfbookmarks.json on first load
     "sidebar_collapsed": False,
     "sidebar_width":    220,
     "sidebar_panel":    "thumbnails",   # "outlines" | "bookmarks" | "thumbnails"
     "zoom_mode":        "auto",         # "width" | "height" | "page" | "auto" | "custom"
     "zoom_factor":      1.0,
     "window_geometry":  None,           # [x, y, w, h] or None
+    "open_tabs":        [],             # ordered list of paths open at last close
+    "active_tab":       0,              # tab index that was active at last close
 }
 
 DEFAULT_STICKY: Dict[str, Any] = {
@@ -234,8 +248,10 @@ class SettingsManager:
 
     def save(self) -> None:
         try:
-            with open(self._path, "w", encoding="utf-8") as f:
+            tmp = self._path.with_suffix(".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self._data, f, indent=2)
+            os.replace(tmp, self._path)
         except Exception:
             pass
 
@@ -329,6 +345,12 @@ class SettingsManager:
         d = _config_dir() / "pdf_thumbs"
         d.mkdir(parents=True, exist_ok=True)
         return d
+
+    def pdf_bookmarks_path(self) -> Path:
+        return _config_dir() / "pdfbookmarks.json"
+
+    def pdf_pages_path(self) -> Path:
+        return _config_dir() / "pdf_last_pages.json"
 
     # ------------------------------------------------------------------
     # Sessions dir

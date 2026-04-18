@@ -588,6 +588,11 @@ class ImageItem(QGraphicsObject):
                 if item is not self and hasattr(item, 'hover_preview'):
                     item.hover_preview = new_val
 
+    def set_anchor(self, anchor: bool) -> None:
+        """Set anchor state directly (used by session restore)."""
+        if self.is_anchor != anchor:
+            self._toggle_anchor()
+
     def _toggle_anchor(self) -> None:
         self.is_anchor = not self.is_anchor
         scene = self.scene()
