@@ -93,8 +93,9 @@ dist\SoloCanvas\SoloCanvas.exe
 - **Grid** — optional dot or line grid with configurable size and snap-to-grid
 - **Undo / Redo** — full undo history for canvas actions (`Ctrl+Z` / `Ctrl+Shift+Z`)
 - **Drawing tools** — freehand draw and shape tools (line, rectangle, ellipse) with configurable colour, width, and opacity
-- **Measurement tool** — drag to measure distances on the canvas with configurable scale and units. Area and cone measurement as well.
-- **Mini Map** — floating overview centered on a selcted image item. Good for 
+- **Measurement tool** — drag to measure distances on the canvas with configurable scale and units; supports line, area, and cone measurement
+- **Mini Map** — floating overview of the full canvas with click-to-navigate
+- **Magnify overlay** — hold `M` to magnify the card or image under the cursor
 - **Multi-select** — rubber-band select, `Ctrl+A`, or `Ctrl+click`; batch actions (flip, roll, rotate, delete, lock) apply to all eligible selected items with counts shown in context menus
 - **PDF Viewer** — open and page through PDF files from the Notepad window
 
@@ -112,7 +113,7 @@ dist\SoloCanvas\SoloCanvas.exe
 
 ### Dice
 
-- **Dice Bag** — place dice on the canvas from a palette of d4, d6, d8, d10, d12, d20, and dF (Fate/Fudge)
+- **Dice Bag** — place dice on the canvas from a palette of d2, d4, d6, d8, d10, d12, d20, and d100
 - **Rolling** — press `R` to roll all selected dice; double-click a die to roll it; roll animation plays on each roll
 - **Roll Log** — running history of all rolls, updated in real time; accessible from the die context menu
 - **Custom dice sets** — load custom dice face images from the `Dice\` folder; manage sets via the Dice Bag
